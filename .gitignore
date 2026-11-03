@@ -91,6 +91,12 @@ coverage/
 Thumbs.db
 desktop.ini
 
+# ===== 数据库文件 =====
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
 # ===== 日志与临时文件 =====
 *.log
 logs/
