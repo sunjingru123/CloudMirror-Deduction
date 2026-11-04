@@ -13,6 +13,7 @@
 """
 
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     CheckConstraint,
@@ -27,6 +28,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
+
+if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
+    from app.models.analysis import PropagationAnalysis
+    from app.models.fault import FaultEvent
 
 
 def utcnow() -> datetime:
@@ -54,6 +59,15 @@ class Topology(Base):
     )
     edges: Mapped[list["TopologyEdge"]] = relationship(
         back_populates="topology",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    faults: Mapped[list["FaultEvent"]] = relationship(
+        back_populates="topology",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    analyses: Mapped[list["PropagationAnalysis"]] = relationship(
         cascade="all, delete-orphan",
         passive_deletes=True,
     )

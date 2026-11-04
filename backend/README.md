@@ -2,8 +2,9 @@
 
 云镜推演后端，基于 **Python 3.11+ / FastAPI / SQLAlchemy / SQLite**。
 
-> 当前阶段：已实现健康检查与**系统拓扑管理**（拓扑 / 节点 / 依赖的完整 CRUD 与持久化）。
-> 故障传播分析、恢复策略优化等业务功能尚未实现。
+> 当前阶段：已实现健康检查、**系统拓扑管理**（拓扑 / 节点 / 依赖的完整 CRUD 与持久化）、
+> **故障注入与恢复**，以及**故障传播分析算法**（多源 BFS + 反向传播 + 环路安全）。
+> 恢复策略优化、推演历史记录等业务功能尚未实现。
 
 ## 依赖方向约定
 
@@ -22,16 +23,27 @@ backend/
 │   ├── api/
 │   │   ├── router.py        # 路由汇总
 │   │   ├── health.py        # GET /api/health
-│   │   └── topologies.py    # 拓扑 / 节点 / 依赖接口
-│   ├── models/topology.py   # Topology / TopologyNode / TopologyEdge
-│   ├── schemas/topology.py  # Pydantic Schema 与枚举
+│   │   ├── topologies.py    # 拓扑 / 节点 / 依赖接口
+│   │   └── faults.py        # 故障注入 / 恢复 / 传播分析接口
+│   ├── models/
+│   │   ├── topology.py      # Topology / TopologyNode / TopologyEdge
+│   │   ├── fault.py         # FaultEvent
+│   │   └── analysis.py      # PropagationAnalysis + 子表
+│   ├── schemas/
+│   │   ├── topology.py      # Pydantic Schema 与枚举
+│   │   ├── fault.py         # 故障枚举与 Schema
+│   │   └── analysis.py      # 分析请求 / 结果 Schema
 │   └── services/
 │       ├── exceptions.py    # 业务异常（404 / 409 / 400）
-│       └── topology_service.py
+│       ├── topology_service.py
+│       ├── fault_service.py        # 故障注入 / 恢复
+│       └── propagation_service.py  # 传播分析算法（多源 BFS）
 ├── tests/
 │   ├── conftest.py          # 独立测试数据库与夹具
 │   ├── test_health.py
-│   └── test_topology.py
+│   ├── test_topology.py
+│   ├── test_faults.py
+│   └── test_propagation.py
 ├── requirements.txt
 ├── pytest.ini
 ├── .env.example
@@ -65,6 +77,7 @@ pytest
 ```
 
 测试使用独立的数据库文件（`_test_cloudmirror.db`，测试结束后自动删除），不会影响开发数据。
+当前共 **56** 个用例（健康检查 3 + 拓扑 22 + 故障 16 + 传播算法 15）。
 
 ## 配置
 
@@ -92,12 +105,31 @@ pytest
 | DELETE | `/api/topologies/{id}/nodes/{node_id}` | 删除节点（级联相关依赖） |
 | POST | `/api/topologies/{id}/edges` | 添加依赖关系 |
 | DELETE | `/api/topologies/{id}/edges/{edge_id}` | 删除依赖关系 |
+| POST | `/api/topologies/{id}/faults` | 注入故障 |
+| GET | `/api/topologies/{id}/faults` | 查询故障事件（含已恢复） |
+| POST | `/api/topologies/{id}/analyze` | 执行故障传播分析（body 可选 `fault_ids`） |
+| GET | `/api/topologies/{id}/analysis/latest` | 读取最近一次分析结果 |
+| GET | `/api/faults/{fault_id}` | 查询故障详情 |
+| POST | `/api/faults/{fault_id}/recover` | 恢复故障 |
 | GET | `/` | 项目信息与文档入口（不在接口文档中展示） |
+
+## 故障传播算法
+
+- 实现于 `app/services/propagation_service.py`（独立 Service）。
+- 依赖方向 `A → B` 表示 A 依赖 B；传播方向相反，构建反向邻接表
+  `dependents[B] = [A, ...]`，从故障源沿 `dependents` 扩散。
+- 多源 BFS：所有激活故障源作为距离 0 的根同时入队；首次发现层级即最短距离。
+- 环路安全（已发现集合访问控制）、受影响节点按 `node_id` 去重。
+- 距离 1 为 `direct`，距离 ≥ 2 为 `indirect`；结果无随机成分，可复现。
 
 ## 数据库表
 
 - `topology`：拓扑基本信息。
 - `topology_node`：节点（类型 / 状态 / 坐标）。
 - `topology_edge`：依赖关系，含唯一约束（防重复边）与检查约束（防自依赖）。
+- `fault_event`：故障事件（类型 / 严重程度 / 状态 / 恢复时间）。
+- `propagation_analysis`：分析汇总指标。
+- `analysis_fault_source` / `analysis_affected_node` / `analysis_path_step`：
+  分析结果的规范化子表（故障源快照、受影响节点、传播路径步骤），不使用无约束 JSON 大字段。
 
 初始化使用 `create_all`，幂等，不会清空已有数据。
