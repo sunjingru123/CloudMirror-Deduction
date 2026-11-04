@@ -31,6 +31,7 @@
 
 from collections import deque
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.analysis import (
@@ -43,6 +44,8 @@ from app.models.fault import FaultEvent
 from app.models.topology import Topology, TopologyEdge, TopologyNode, utcnow
 from app.schemas.analysis import (
     AffectedNodeRead,
+    AnalysisHistoryItem,
+    AnalysisHistoryPage,
     AnalysisResult,
     FaultSourceRead,
     ImpactLevel,
@@ -381,3 +384,62 @@ def get_latest_analysis(db: Session, topology_id: int) -> AnalysisResult:
     if record is None:
         raise NotFoundError(f"该拓扑尚无分析记录：topology_id={topology_id}")
     return _load_result(db, record.id)
+
+
+def get_analysis(db: Session, topology_id: int, analysis_id: int) -> AnalysisResult:
+    """读取指定拓扑下某一次分析的完整结果。
+
+    同时校验分析记录确实属于该拓扑，避免跨拓扑越权读取。
+    """
+    _get_topology_or_404(db, topology_id)
+    record = db.get(PropagationAnalysis, analysis_id)
+    if record is None:
+        raise NotFoundError(f"分析结果不存在：analysis_id={analysis_id}")
+    if record.topology_id != topology_id:
+        raise NotFoundError(
+            f"分析结果不属于该拓扑：analysis_id={analysis_id}, topology_id={topology_id}"
+        )
+    return _load_result(db, record.id)
+
+
+def list_analyses(
+    db: Session, topology_id: int, page: int = 1, page_size: int = 20
+) -> AnalysisHistoryPage:
+    """分页查询指定拓扑的历史分析记录（按时间倒序）。"""
+    topology = _get_topology_or_404(db, topology_id)
+
+    total = (
+        db.query(func.count(PropagationAnalysis.id))
+        .filter(PropagationAnalysis.topology_id == topology_id)
+        .scalar()
+        or 0
+    )
+
+    rows = (
+        db.query(PropagationAnalysis)
+        .filter(PropagationAnalysis.topology_id == topology_id)
+        .order_by(PropagationAnalysis.analysis_time.desc(), PropagationAnalysis.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+
+    items = [
+        AnalysisHistoryItem(
+            analysis_id=row.id,
+            topology_id=row.topology_id,
+            topology_name=topology.name,
+            analysis_time=row.analysis_time,
+            fault_source_count=row.fault_source_count,
+            direct_affected_count=row.direct_affected_count,
+            indirect_affected_count=row.indirect_affected_count,
+            total_affected_count=row.total_affected_count,
+            total_node_count=row.total_node_count,
+            impact_ratio=row.impact_ratio,
+        )
+        for row in rows
+    ]
+
+    return AnalysisHistoryPage(
+        total=int(total), page=page, page_size=page_size, items=items
+    )

@@ -5,6 +5,7 @@ const navItems = [
   { path: '/', label: '首页' },
   { path: '/topology', label: '系统拓扑' },
   { path: '/fault-simulation', label: '故障模拟' },
+  { path: '/recovery', label: '恢复策略' },
   { path: '/history', label: '历史记录' },
 ]
 </script>

@@ -10,6 +10,7 @@ from app.models.analysis import (
     PropagationAnalysis,
 )
 from app.models.fault import FaultEvent
+from app.models.recovery import RecoveryPlan, RecoveryStrategy, RecoveryStrategyNote
 from app.models.topology import Topology, TopologyEdge, TopologyNode
 
 __all__ = [
@@ -21,4 +22,7 @@ __all__ = [
     "AnalysisFaultSource",
     "AnalysisAffectedNode",
     "AnalysisPathStep",
+    "RecoveryPlan",
+    "RecoveryStrategy",
+    "RecoveryStrategyNote",
 ]

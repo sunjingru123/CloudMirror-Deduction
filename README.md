@@ -9,10 +9,12 @@
 | 第一阶段 | 工程初始化、健康检查、前后端基础联调 | ✅ 已完成 |
 | 第二阶段 | 系统拓扑管理与数据建模（拓扑 / 节点 / 依赖 CRUD + Vue Flow 编辑器） | ✅ 已完成 |
 | 第三阶段 | 故障注入、故障传播分析算法与传播可视化 | ✅ 已完成 |
-| 第四阶段 | 恢复策略优化与历史记录 | 🚧 待开发 |
+| 第四阶段 | 恢复策略优化、策略对比与推演历史记录管理 | ✅ 已完成 |
 
-已实现的功能均可通过真实后端 API 操作并持久化到 SQLite；**尚未实现**恢复策略优化、
-推演历史记录页面等业务功能。
+已实现的功能均可通过真实后端 API 操作并持久化到 SQLite；前端各页面数据均来自真实接口，
+不含演示假数据。恢复策略的恢复时间、成本、影响节点数与评分均为**规则模拟估算值**，
+不是生产环境测量值；完整的冗余关系建模、真实执行恢复动作等仍未实现（详见
+[`docs/技术方案.md`](docs/技术方案.md) 的「尚未实现」章节）。
 
 ## 依赖方向约定（重要）
 
@@ -40,8 +42,12 @@
 | 故障注入 / 查询 / 恢复（`fault_event` 持久化） | ✅ 已实现 |
 | 故障传播分析算法（多源 BFS、反向传播、环路安全、路径与影响等级） | ✅ 已实现 |
 | 故障模拟页面（真实 API 注入 / 恢复 / 分析 + Vue Flow 传播高亮） | ✅ 已实现 |
-| 恢复策略优化与对比 | 🚧 待开发 |
-| 推演历史记录与回溯 | 🚧 待开发 |
+| 恢复策略模型与规则推荐（重启 / 切换 / 隔离，含适用性与不适用原因） | ✅ 已实现 |
+| 恢复策略对比页面（指标对比、评分明细、推荐理由） | ✅ 已实现 |
+| 推演历史分页查询与单条详情回看（含故障源快照） | ✅ 已实现 |
+| 历史记录页面（真实分页接口 + 详情弹窗） | ✅ 已实现 |
+| 显式冗余 / 备用节点关系建模 | 🚧 待开发（当前用「同类型未受影响节点」保守推断） |
+| 真实执行恢复动作、对接真实云平台 | 🚧 待开发（当前仅输出策略与模拟估算） |
 
 ### 节点类型
 
@@ -74,6 +80,36 @@
 - 距离 1 为 `direct`，距离 ≥ 2 为 `indirect`；故障源本身不计入受影响节点。
 - 结果完全由「拓扑 + 故障记录」决定，**不含随机数、不调用大模型**，可复现。
 
+## 恢复策略优化
+
+实现于 `backend/app/services/recovery_service.py`（独立 Service），参数集中在
+`backend/app/services/recovery_config.py`。输入为「当前拓扑 + 一次传播分析结果」。
+
+| 策略类型 | 适用条件 | 估算恢复时间 | 资源成本 | 基础风险 |
+| --- | --- | --- | --- | --- |
+| `restart_service`（服务重启） | 存在 `node_down` / `service_unavailable` 类故障 | `120 + 60 × 可重启节点数` 秒 | 低 | 中 |
+| `failover`（备用节点切换） | 每个故障节点都有可用同类型备用节点 | `60 + 30 × 故障节点数` 秒 | 高 | 低 |
+| `isolate_node`（故障节点隔离） | 隔离后用户入口仍保留可用依赖 | `30 + 15 × 故障节点数` 秒 | 低 | 低 / 中 |
+
+- **备用节点不做虚构**：当前没有显式冗余关系模型，`failover` 仅在拓扑中存在
+  「同类型且不在故障源 / 影响范围内」的节点时判定为适用，否则返回 `applicable=false`
+  并给出具体缺失原因。
+- **隔离不保证业务恢复**：若隔离会让某个 `user_entry` 节点失去全部直接依赖，
+  该策略直接判定为**不适用**且风险为 `high`，永远不会被推荐。
+- **评分模型**（可解释的加权规则，权重写入代码与文档）：
+  恢复时间 0.25、影响范围 0.20、资源成本 0.15、操作风险 0.20、业务恢复程度 0.20（合计 1.00）。
+  各分项归一化后加权求和 ×100 得到 0-100 的评分，参考恢复时间为 600 秒。
+- **推荐规则**：在**适用**策略中取评分最高者；同分按固定顺序
+  `restart_service → failover → isolate_node` 打破平局。不适用策略仍展示评分，但绝不推荐。
+- 不含随机数、不使用机器学习或大模型；相同输入必然得到相同输出，可复现。
+
+## 推演历史
+
+- 每次传播分析都会落库（`propagation_analysis` 及其子表），保存故障源与受影响节点的
+  **名称快照**，因此故障恢复或节点删除后仍可完整回看。
+- `GET /api/topologies/{id}/analyses` 支持分页（`page`、`page_size`），按时间倒序并返回总数。
+- `GET /api/topologies/{id}/analyses/{analysis_id}` 返回当时的完整分析结果，并校验其属于该拓扑。
+
 ## 技术栈
 
 | 层次 | 技术 |
@@ -96,26 +132,34 @@ CloudMirror-Deduction/
 │   │   ├── api/
 │   │   │   ├── health.py            # GET /api/health
 │   │   │   ├── topologies.py        # 拓扑 / 节点 / 依赖接口
-│   │   │   └── faults.py            # 故障注入 / 查询 / 恢复 / 传播分析接口
+│   │   │   ├── faults.py            # 故障注入 / 查询 / 恢复 / 传播分析接口
+│   │   │   ├── analyses.py          # 推演历史列表 / 详情接口
+│   │   │   └── recovery.py          # 恢复策略推荐 / 策略配置接口
 │   │   ├── models/
 │   │   │   ├── topology.py          # Topology / TopologyNode / TopologyEdge
 │   │   │   ├── fault.py             # FaultEvent
-│   │   │   └── analysis.py          # PropagationAnalysis + 故障源 / 受影响节点 / 路径子表
+│   │   │   ├── analysis.py          # PropagationAnalysis + 故障源 / 受影响节点 / 路径子表
+│   │   │   └── recovery.py          # RecoveryPlan / RecoveryStrategy / RecoveryStrategyNote
 │   │   ├── schemas/
 │   │   │   ├── topology.py          # Pydantic Schema 与枚举
 │   │   │   ├── fault.py             # 故障类型 / 严重程度 / 状态枚举
-│   │   │   └── analysis.py          # 分析请求 / 结果 Schema
+│   │   │   ├── analysis.py          # 分析请求 / 结果 / 历史分页 Schema
+│   │   │   └── recovery.py          # 恢复策略请求 / 响应 Schema
 │   │   └── services/
 │   │       ├── exceptions.py        # NotFoundError / ConflictError 等
 │   │       ├── topology_service.py  # 拓扑业务逻辑
 │   │       ├── fault_service.py     # 故障注入 / 恢复业务逻辑
-│   │       └── propagation_service.py  # 故障传播分析算法（多源 BFS）
+│   │       ├── propagation_service.py  # 故障传播分析算法（多源 BFS）+ 历史查询
+│   │       ├── recovery_config.py   # 策略参数 / 评分权重 / 文案
+│   │       └── recovery_service.py  # 恢复策略评估与推荐
 │   ├── tests/
 │   │   ├── conftest.py              # 独立测试数据库与夹具
 │   │   ├── test_health.py
 │   │   ├── test_topology.py         # 22 个拓扑测试
 │   │   ├── test_faults.py           # 16 个故障测试
-│   │   └── test_propagation.py      # 15 个传播算法测试（共 56 个）
+│   │   ├── test_propagation.py      # 15 个传播算法测试
+│   │   ├── test_recovery.py         # 13 个恢复策略测试
+│   │   └── test_analysis_history.py # 10 个历史记录测试（共 82 个）
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── .env.example
@@ -129,11 +173,13 @@ CloudMirror-Deduction/
 │   │   │   ├── health.ts
 │   │   │   ├── topology.ts          # 拓扑接口封装与类型
 │   │   │   ├── fault.ts             # 故障注入 / 恢复接口
-│   │   │   └── analysis.ts          # 传播分析接口
+│   │   │   ├── analysis.ts          # 传播分析 / 历史列表 / 历史详情接口
+│   │   │   └── recovery.ts          # 恢复策略推荐 / 策略配置接口
 │   │   ├── components/TopologyNode.vue   # Vue Flow 自定义节点（支持传播高亮）
 │   │   ├── constants/
 │   │   │   ├── topology.ts          # 节点类型 / 状态元数据
-│   │   │   └── fault.ts             # 故障类型 / 严重程度 / 影响等级配色
+│   │   │   ├── fault.ts             # 故障类型 / 严重程度 / 影响等级配色
+│   │   │   └── recovery.ts          # 策略类型 / 成本 / 风险标签与配色
 │   │   ├── router/index.ts
 │   │   ├── styles/main.css
 │   │   └── views/
@@ -141,11 +187,13 @@ CloudMirror-Deduction/
 │   │       ├── Topology.vue          # 拓扑列表（增删 + 进入编辑）
 │   │       ├── TopologyEditor.vue    # Vue Flow 拓扑编辑器
 │   │       ├── FaultSimulation.vue   # 故障模拟 + 传播可视化
-│   │       └── History.vue           # 占位
+│   │       ├── Recovery.vue          # 恢复策略对比与推荐
+│   │       └── History.vue           # 推演历史分页列表 + 详情弹窗
 │   ├── vite.config.ts
 │   ├── tsconfig.json
 │   └── .env.example
 ├── docs/项目说明.md
+├── docs/技术方案.md
 ├── data/、screenshots/
 ├── .gitignore
 └── README.md
@@ -184,7 +232,7 @@ npm run dev
 ### 3. 测试与构建
 
 ```bash
-cd backend && pytest          # 后端测试（56 个）
+cd backend && pytest          # 后端测试（82 个）
 cd frontend && npm run build  # 前端类型检查 + 生产构建
 ```
 
@@ -207,13 +255,19 @@ cd frontend && npm run build  # 前端类型检查 + 生产构建
 | GET | `/api/topologies/{id}/faults` | 查询故障事件（含已恢复） |
 | POST | `/api/topologies/{id}/analyze` | 执行故障传播分析（body 可选 `fault_ids`） |
 | GET | `/api/topologies/{id}/analysis/latest` | 读取最近一次分析结果 |
+| GET | `/api/topologies/{id}/analyses` | 分页查询历史分析（`page`、`page_size`，时间倒序） |
+| GET | `/api/topologies/{id}/analyses/{analysis_id}` | 读取单次历史分析详情 |
+| POST | `/api/topologies/{id}/recovery/recommend` | 生成恢复策略并推荐（body 可选 `analysis_id`） |
+| GET | `/api/topologies/{id}/recovery/strategies` | 查询策略类型、估算参数与评分权重 |
 | GET | `/api/faults/{fault_id}` | 查询故障详情 |
 | POST | `/api/faults/{fault_id}/recover` | 恢复故障 |
 
-错误约定：资源不存在 → `404`；名称重复 / 重复边 / 重复的同类激活故障 → `409`；自依赖 → `400`；
-指定已恢复的故障参与分析 → `400`；请求体校验失败 → `422`。所有错误均返回带中文说明的 `{"detail": "..."}`。
+错误约定：资源不存在 / 分析不属于该拓扑 → `404`；名称重复 / 重复边 / 重复的同类激活故障 → `409`；
+自依赖、指定已恢复故障参与分析、分析无激活故障源时请求恢复策略 → `400`；请求体校验失败 → `422`。
+所有错误均返回带中文说明的 `{"detail": "..."}`。
 
-> 传播算法的完整说明（方向、环路、多源、去重）见 [`docs/项目说明.md`](docs/项目说明.md)。
+> 传播算法的完整说明（方向、环路、多源、去重）见 [`docs/项目说明.md`](docs/项目说明.md)；
+> 恢复策略的规则、权重与取舍见 [`docs/技术方案.md`](docs/技术方案.md)。
 
 ## 数据库表
 
@@ -227,6 +281,9 @@ cd frontend && npm run build  # 前端类型检查 + 生产构建
 | `analysis_fault_source` | 故障源快照：`analysis_id`(FK, 级联)、`fault_id`、`node_id`、`node_name`、`fault_type`、`severity` |
 | `analysis_affected_node` | 受影响节点：`analysis_id`(FK, 级联)、`node_id`、`node_name`、`impact_level`、`distance`、`source_fault_id`、`source_node_id` |
 | `analysis_path_step` | 传播路径步骤：`affected_node_id`(FK, 级联)、`step_index`、`node_id`、`node_name` |
+| `recovery_plan` | 一次策略推荐：`topology_id`(FK)、`analysis_id`(FK, 置空保留)、`recommended_strategy_id`(软引用)、`recommendation_reason`、`estimation_notice`、`created_at` |
+| `recovery_strategy` | 策略评估：`plan_id`(FK, 级联)、`strategy_type`、`applicable`、`inapplicable_reason`、估算指标、`risk_level`、`recommendation_score` |
+| `recovery_strategy_note` | 策略条目：`strategy_id`(FK, 级联)、`kind`(advantage/disadvantage/prerequisite)、`position`、`content` |
 
 数据库初始化使用 `create_all`，**幂等**：重复启动不会清空或重建已有数据。
 

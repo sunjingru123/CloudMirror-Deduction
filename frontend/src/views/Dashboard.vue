@@ -52,7 +52,8 @@ onMounted(checkConnection)
       <p class="dash-en">CloudMirror Deduction</p>
       <p class="dash-desc">
         面向云原生业务系统的故障传播分析与恢复策略优化平台。
-        当前处于工程初始化阶段，已完成前后端基础工程与健康检查联调，业务模块仍在规划中。
+        已完成拓扑管理、故障注入与传播分析、恢复策略对比与推演历史回看，
+        页面数据均来自真实后端接口。
       </p>
     </section>
 
@@ -110,22 +111,26 @@ uvicorn app.main:app --reload</code></pre>
     </section>
 
     <section class="dash-next">
-      <h2 class="dash-section-title">模块规划</h2>
+      <h2 class="dash-section-title">功能模块</h2>
       <p class="dash-section-desc">
-        以下页面已完成路由与基础布局，具体业务功能尚未实现。
+        以下模块均已接入后端接口与数据库，可按顺序体验完整的推演流程。
       </p>
       <ul class="dash-list">
         <li>
           <RouterLink to="/topology">系统拓扑</RouterLink>
-          <span>基于 Vue Flow 的拓扑画布占位，展示节点与连线的渲染能力。</span>
+          <span>基于 Vue Flow 的拓扑编辑器，支持节点与依赖关系的增删改查及持久化。</span>
         </li>
         <li>
           <RouterLink to="/fault-simulation">故障模拟</RouterLink>
-          <span>故障注入与传播推演的交互入口，待接入后端服务。</span>
+          <span>注入与恢复故障，调用后端传播分析算法并在画布中高亮影响范围。</span>
+        </li>
+        <li>
+          <RouterLink to="/recovery">恢复策略</RouterLink>
+          <span>对比服务重启、备用节点切换、故障节点隔离三类策略并给出规则推荐。</span>
         </li>
         <li>
           <RouterLink to="/history">历史记录</RouterLink>
-          <span>推演历史与结果回溯，待接入数据库与接口。</span>
+          <span>分页回看历史传播分析结果，含故障源与影响节点快照。</span>
         </li>
       </ul>
     </section>

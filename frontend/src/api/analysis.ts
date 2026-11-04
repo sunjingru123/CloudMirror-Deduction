@@ -57,6 +57,28 @@ export interface AnalysisResult {
 
 const TOPOLOGY_BASE = '/api/topologies'
 
+/** 历史分析列表中的一行。 */
+export interface AnalysisHistoryItem {
+  analysis_id: number
+  topology_id: number
+  topology_name: string
+  analysis_time: string
+  fault_source_count: number
+  direct_affected_count: number
+  indirect_affected_count: number
+  total_affected_count: number
+  total_node_count: number
+  impact_ratio: number
+}
+
+/** 分页后的历史分析列表。 */
+export interface AnalysisHistoryPage {
+  total: number
+  page: number
+  page_size: number
+  items: AnalysisHistoryItem[]
+}
+
 export const analysisApi = {
   /** 执行传播分析；不传 faultIds 时分析全部激活故障。 */
   analyze: (topologyId: number, faultIds?: number[]) =>
@@ -65,4 +87,12 @@ export const analysisApi = {
     }),
   latest: (topologyId: number) =>
     http.get<AnalysisResult>(`${TOPOLOGY_BASE}/${topologyId}/analysis/latest`),
+  /** 分页查询历史分析（时间倒序）。 */
+  history: (topologyId: number, page = 1, pageSize = 20) =>
+    http.get<AnalysisHistoryPage>(`${TOPOLOGY_BASE}/${topologyId}/analyses`, {
+      params: { page, page_size: pageSize },
+    }),
+  /** 读取单次历史分析的完整结果。 */
+  detail: (topologyId: number, analysisId: number) =>
+    http.get<AnalysisResult>(`${TOPOLOGY_BASE}/${topologyId}/analyses/${analysisId}`),
 }

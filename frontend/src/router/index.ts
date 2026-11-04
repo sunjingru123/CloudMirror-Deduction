@@ -27,6 +27,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '故障模拟 Fault Simulation' },
   },
   {
+    path: '/recovery',
+    name: 'recovery',
+    component: () => import('@/views/Recovery.vue'),
+    meta: { title: '恢复策略 Recovery Strategy' },
+  },
+  {
     path: '/history',
     name: 'history',
     component: () => import('@/views/History.vue'),

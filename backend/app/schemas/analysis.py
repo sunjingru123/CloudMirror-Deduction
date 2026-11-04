@@ -87,3 +87,27 @@ class AnalysisResult(BaseModel):
     impact_ratio: float
     propagation_paths: list[PropagationPathRead] = Field(default_factory=list)
     analysis_time: datetime
+
+
+class AnalysisHistoryItem(BaseModel):
+    """历史分析列表中的一行（汇总指标）。"""
+
+    analysis_id: int
+    topology_id: int
+    topology_name: str
+    analysis_time: datetime
+    fault_source_count: int
+    direct_affected_count: int
+    indirect_affected_count: int
+    total_affected_count: int
+    total_node_count: int
+    impact_ratio: float
+
+
+class AnalysisHistoryPage(BaseModel):
+    """分页后的历史分析列表。"""
+
+    total: int
+    page: int
+    page_size: int
+    items: list[AnalysisHistoryItem] = Field(default_factory=list)
