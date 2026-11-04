@@ -7,17 +7,19 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.database import init_db
+from app.services.exceptions import ServiceError
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用启动时初始化数据库连接。"""
+    """应用启动时初始化数据库结构（幂等，不会清空数据）。"""
     init_db()
     yield
 
@@ -28,6 +30,13 @@ app = FastAPI(
     version=settings.VERSION,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
+    """将服务层异常统一转换为带明确 detail 的 HTTP 响应。"""
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
 
 app.add_middleware(
     CORSMiddleware,

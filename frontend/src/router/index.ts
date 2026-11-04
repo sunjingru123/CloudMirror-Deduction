@@ -15,6 +15,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '系统拓扑 Topology' },
   },
   {
+    path: '/topology/:id(\\d+)',
+    name: 'topology-editor',
+    component: () => import('@/views/TopologyEditor.vue'),
+    meta: { title: '拓扑编辑 Topology Editor' },
+  },
+  {
     path: '/fault-simulation',
     name: 'fault-simulation',
     component: () => import('@/views/FaultSimulation.vue'),

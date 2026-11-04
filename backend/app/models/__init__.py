@@ -1,7 +1,8 @@
 """ORM 模型包。
 
-当前尚未定义业务模型，后续在此目录下新增模型并导入到本文件中，
-以便 `Base.metadata` 能够注册到它们。
+在此导入所有模型，使其注册到 `Base.metadata`，从而被 `init_db()` 建表。
 """
 
-__all__: list[str] = []
+from app.models.topology import Topology, TopologyEdge, TopologyNode
+
+__all__ = ["Topology", "TopologyNode", "TopologyEdge"]

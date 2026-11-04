@@ -2,37 +2,44 @@
 
 云镜推演前端，基于 **Vue 3 / Vite / TypeScript / Element Plus / Vue Flow / Axios**。
 
-> 当前阶段：工程初始化。已完成项目脚手架、路由、Element Plus 与 Vue Flow 接入、
-> Axios 封装与首页后端连通性检测；各业务页面仅为布局占位，尚无业务功能。
+> 当前阶段：已完成项目脚手架、路由、Element Plus 与 Vue Flow 接入、Axios 封装、
+> 首页后端连通性检测，以及**系统拓扑管理**（拓扑列表 + Vue Flow 拓扑编辑器，全部调用真实 API）。
+> 故障模拟与历史记录页面仍为占位。
+
+## 依赖方向约定
+
+> Vue Flow 中箭头由 A 指向 B 表示 **A 依赖 B**；节点**底部**为 source 连接点，
+> **顶部**为 target 连接点，与后端 `source_node_id` / `target_node_id` 一一对应。
 
 ## 目录结构
 
 ```
 frontend/
-├── public/
-│   └── favicon.svg
+├── public/favicon.svg
 ├── src/
-│   ├── main.ts              # 应用入口（Element Plus / 图标 / Vue Flow 样式 / 路由）
-│   ├── App.vue              # 顶部导航 + 内容区布局
-│   ├── env.d.ts             # 环境变量与 .vue 类型声明
+│   ├── main.ts                    # Element Plus / 图标 / Vue Flow 样式 / 路由
+│   ├── App.vue                    # 顶部导航 + 内容区布局
+│   ├── env.d.ts
 │   ├── api/
-│   │   ├── http.ts          # Axios 实例（统一 baseURL、超时）
-│   │   └── health.ts        # GET /api/health 封装
-│   ├── router/
-│   │   └── index.ts         # Vue Router 配置
-│   ├── styles/
-│   │   └── main.css         # 全局浅色科技风样式
+│   │   ├── http.ts                # Axios 实例（统一 baseURL、超时）
+│   │   ├── errors.ts              # 错误信息提取
+│   │   ├── health.ts              # GET /api/health
+│   │   └── topology.ts            # 拓扑 / 节点 / 依赖接口与类型
+│   ├── components/TopologyNode.vue # Vue Flow 自定义节点
+│   ├── constants/topology.ts       # 节点类型 / 状态元数据
+│   ├── router/index.ts
+│   ├── styles/main.css
 │   └── views/
-│       ├── Dashboard.vue        # 首页（项目介绍 + 后端连接状态）
-│       ├── Topology.vue         # 系统拓扑（Vue Flow 画布占位）
-│       ├── FaultSimulation.vue  # 故障模拟（占位）
-│       └── History.vue          # 历史记录（占位）
+│       ├── Dashboard.vue           # 首页（项目介绍 + 后端连接状态）
+│       ├── Topology.vue            # 拓扑列表（新建 / 删除 / 进入编辑）
+│       ├── TopologyEditor.vue      # Vue Flow 拓扑编辑器
+│       ├── FaultSimulation.vue     # 占位
+│       └── History.vue             # 占位
 ├── index.html
 ├── vite.config.ts
 ├── tsconfig.json
 ├── package.json
-├── .env.example
-└── README.md
+└── .env.example
 ```
 
 ## 本地启动
@@ -48,10 +55,8 @@ npm run dev
 ## 生产构建
 
 ```bash
-npm run build
+npm run build   # vue-tsc 类型检查 + vite build，产物输出到 dist/
 ```
-
-构建产物输出到 `dist/`（已被 `.gitignore` 忽略）。
 
 ## 配置
 
@@ -63,9 +68,15 @@ npm run build
 
 ## 已实现内容
 
-- Vue Router：首页、系统拓扑、故障模拟、历史记录四个路由。
-- Element Plus 与图标全局注册，浅色科技风全局样式。
-- Vue Flow 画布接入（拓扑页占位示意）。
-- Axios 实例封装，统一后端基础地址。
-- 首页挂载后自动请求 `/api/health`，真实展示「已连接 / 后端未连接」，
-  后端不可用时不会崩溃。
+- 路由：`/`、`/topology`（列表）、`/topology/:id`（编辑器）、`/fault-simulation`、`/history`。
+- 首页：挂载后请求 `/api/health`，真实展示「已连接 / 后端未连接」，后端不可用时不崩溃。
+- 拓扑列表：从后端加载列表，支持新建、删除、点击进入编辑。
+- 拓扑编辑器（Vue Flow）：读取后端节点与边并真实渲染；添加不同类型的节点；
+  拖动节点并自动保存位置；拖拽连线创建依赖（调用后端，拒绝自依赖与重复边）；
+  点击节点编辑名称 / 类型 / 状态 / 描述；删除节点与依赖；重命名拓扑；批量保存布局。
+- 全部增删改均调用真实后端 API，不使用本地假数据；操作失败时通过 Element Plus 消息提示。
+
+## 未实现内容
+
+- 故障模拟、历史记录页面的业务功能；
+- 拓扑数据的导入 / 导出、撤销等高级编辑能力。
