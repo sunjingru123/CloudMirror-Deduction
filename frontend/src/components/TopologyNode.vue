@@ -58,6 +58,7 @@ const impactMeta = computed(() => {
   >
     <!-- 上方为 target：箭头由依赖方指向被依赖方 -->
     <Handle type="target" :position="Position.Top" />
+    <span class="tn-handle-label tn-handle-label--top">被依赖</span>
 
     <header class="tn-head">
       <span class="tn-type">{{ typeMeta.label }}</span>
@@ -92,6 +93,7 @@ const impactMeta = computed(() => {
 
     <!-- 下方为 source：从这里拖出连线表示「当前节点依赖目标节点」 -->
     <Handle type="source" :position="Position.Bottom" />
+    <span class="tn-handle-label tn-handle-label--bottom">依赖对方</span>
   </div>
 </template>
 
@@ -99,6 +101,7 @@ const impactMeta = computed(() => {
 .tn {
   --tn-color: #64748b;
   --tn-impact: transparent;
+  position: relative;
   min-width: 148px;
   padding: 8px 12px 10px;
   border-radius: 10px;
@@ -203,5 +206,30 @@ const impactMeta = computed(() => {
   width: 6px;
   height: 6px;
   border-radius: 50%;
+}
+
+.tn-handle-label {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 9.5px;
+  font-weight: 600;
+  color: #94a3b8;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.tn-handle-label--top {
+  top: -14px;
+}
+
+.tn-handle-label--bottom {
+  bottom: -14px;
+}
+
+.tn:hover .tn-handle-label {
+  opacity: 1;
 }
 </style>

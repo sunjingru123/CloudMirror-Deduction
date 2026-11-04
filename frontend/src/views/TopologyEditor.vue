@@ -91,6 +91,7 @@ const selectedEdgeId = ref<number | null>(null)
 const savingNode = ref(false)
 const savingLayout = ref(false)
 const addingNode = ref(false)
+const reversingEdge = ref(false)
 
 const nodeForm = reactive({
   name: '',
@@ -128,6 +129,12 @@ const selectedEdgeDescription = computed(() => {
   const description = selectedEdge.value?.data?.description
   return typeof description === 'string' ? description : ''
 })
+
+/** 用节点名称展示依赖方向，避免只看到 id 造成误判。 */
+function nodeName(id: number | string): string {
+  const node = nodesById.value[Number(id)]
+  return node ? node.name : `#${id}`
+}
 
 // --------------------------------------------------------------------------- //
 // 数据映射
@@ -457,7 +464,7 @@ async function onConnect(connection: Connection) {
     })
     topology.value.edges = [...topology.value.edges, data]
     rebuildFlowEdges()
-    ElMessage.success('依赖关系已创建')
+    ElMessage.success(`依赖关系已创建：${nodeName(sourceId)} 依赖 ${nodeName(targetId)}`)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '创建依赖关系失败'))
   }
@@ -474,6 +481,44 @@ async function removeSelectedEdge() {
     ElMessage.success('依赖关系已删除')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '删除依赖关系失败'))
+  }
+}
+
+/** 反转依赖方向：先建反向边（若已存在则后端返回冲突），成功后再删除原边。 */
+async function reverseSelectedEdge() {
+  if (!topology.value || !selectedEdge.value) return
+  const edgeId = selectedEdge.value.data?.edgeId
+  if (typeof edgeId !== 'number') return
+  const sourceId = Number(selectedEdge.value.source)
+  const targetId = Number(selectedEdge.value.target)
+  if (!Number.isFinite(sourceId) || !Number.isFinite(targetId)) return
+
+  reversingEdge.value = true
+  try {
+    // 先创建反向边：若反向依赖已存在，后端返回冲突，原边保持不变
+    const { data } = await topologyApi.addEdge(topology.value.id, {
+      source_node_id: targetId,
+      target_node_id: sourceId,
+    })
+    topology.value.edges = [...topology.value.edges, data]
+    try {
+      await topologyApi.removeEdge(topology.value.id, edgeId)
+      topology.value.edges = topology.value.edges.filter((item) => item.id !== edgeId)
+      selectedEdgeId.value = data.id
+      rebuildFlowEdges()
+      ElMessage.success(
+        `依赖方向已反转：${nodeName(targetId)} 依赖 ${nodeName(sourceId)}`,
+      )
+    } catch (error) {
+      rebuildFlowEdges()
+      ElMessage.warning(
+        extractErrorMessage(error, '反向依赖已创建，但删除原依赖失败，请检查该拓扑的依赖关系'),
+      )
+    }
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '反转依赖方向失败'))
+  } finally {
+    reversingEdge.value = false
   }
 }
 
@@ -678,8 +723,9 @@ onMounted(loadTopology)
 
     <p class="editor-hint">
       操作提示：点击下方按钮添加节点；拖动节点调整位置（松手即自动保存）；
-      从节点<strong>底部</strong>圆点拖到另一节点<strong>顶部</strong>圆点创建依赖
-      （<strong>箭头方向 = 依赖方向</strong>：A → B 表示 A 依赖 B）；点击节点或连线可在右侧编辑或删除。
+      从节点<strong>底部</strong>圆点（「依赖对方」）拖到另一节点<strong>顶部</strong>圆点（「被依赖」）创建依赖
+      （<strong>箭头方向 = 依赖方向</strong>：A → B 表示 A 依赖 B）；点击节点或连线可在右侧编辑或删除，
+      若方向建反，可选中连线后点击「反转依赖方向」。
       冗余关系（主备 / 双活）是<strong>独立于依赖边</strong>的声明，用于恢复策略的备用节点判定，
       可在右侧「冗余关系」区域创建。
     </p>
@@ -839,15 +885,26 @@ onMounted(loadTopology)
         <template v-else-if="selectedEdge">
           <p class="inspector-label">依赖关系</p>
           <p class="inspector-desc">
-            <strong>{{ String(selectedEdge.source) }}</strong>
+            <strong>{{ nodeName(selectedEdge.source) }}</strong>
             →
-            <strong>{{ String(selectedEdge.target) }}</strong>
-            （左侧节点依赖右侧节点）
+            <strong>{{ nodeName(selectedEdge.target) }}</strong>
+          </p>
+          <p class="inspector-desc cm-muted">
+            依赖方向：左侧节点<strong>依赖</strong>右侧节点（箭头指向被依赖方）。
+            若方向建反，可点击下方「反转依赖方向」修正，无需删除重建。
           </p>
           <p class="inspector-desc cm-muted">
             {{ selectedEdgeDescription || '无说明' }}
           </p>
           <div class="inspector-actions">
+            <el-button
+              type="primary"
+              plain
+              :loading="reversingEdge"
+              @click="reverseSelectedEdge"
+            >
+              反转依赖方向
+            </el-button>
             <el-button type="danger" plain @click="removeSelectedEdge">删除依赖关系</el-button>
           </div>
         </template>
