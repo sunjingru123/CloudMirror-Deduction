@@ -16,8 +16,23 @@ import type {
   TopologyEdge,
   TopologyNode as ApiNode,
 } from '@/api/topology'
+import { redundancyApi } from '@/api/redundancy'
+import type {
+  MemberRole,
+  RedundancyGroup,
+  RedundancyGroupPayload,
+  RedundancyMemberPayload,
+  RedundancyType,
+} from '@/api/redundancy'
 import { extractErrorMessage } from '@/api/errors'
 import { NODE_STATUSES, NODE_TYPES, nodeTypeLabel } from '@/constants/topology'
+import {
+  REDUNDANCY_EDGE_COLOR,
+  REDUNDANCY_TYPES,
+  isStandbyTopology,
+  memberRoleMeta,
+  redundancyTypeMeta,
+} from '@/constants/redundancy'
 
 const route = useRoute()
 const router = useRouter()
@@ -34,17 +49,42 @@ interface FlowNodeData {
   nodeType: NodeType
   status: NodeStatus
   description: string | null
+  redundancyRole: MemberRole | null
+  redundancyGroupName: string | null
 }
 
 interface FlowEdgeData {
-  edgeId: number
-  description: string | null
+  /** 边类型：依赖关系 / 冗余关系（两者视觉样式不同）。 */
+  kind: 'dependency' | 'redundancy'
+  /** 依赖边特有：后端 edge id。 */
+  edgeId?: number
+  description?: string | null
+  /** 冗余边特有。 */
+  redundancyGroupId?: number
+  redundancyLabel?: string
 }
 
 // 使用 shallowRef 避免 Vue 对 Vue Flow 复杂泛型类型做深层解包
 const flowNodes = shallowRef<Node<FlowNodeData>[]>([])
 const flowEdges = shallowRef<Edge<FlowEdgeData>[]>([])
 const nodesById = ref<Record<number, ApiNode>>({})
+
+// 冗余关系状态
+const redundancyGroups = ref<RedundancyGroup[]>([])
+const roleByNodeId = ref<Record<number, { role: MemberRole; groupName: string }>>({})
+const groupDialogVisible = ref(false)
+const savingGroup = ref(false)
+const editingGroupId = ref<number | null>(null)
+
+const groupForm = reactive({
+  name: '',
+  redundancyType: 'active_standby' as RedundancyType,
+  description: '',
+  primaryId: null as number | null,
+  standbyIds: [] as number[],
+  standbyPriorities: {} as Record<number, number>,
+  activeIds: [] as number[],
+})
 
 const selectedNodeId = ref<number | null>(null)
 const selectedEdgeId = ref<number | null>(null)
@@ -66,6 +106,18 @@ const selectedNode = computed(() =>
   selectedNodeId.value === null ? null : (nodesById.value[selectedNodeId.value] ?? null),
 )
 
+/** 画布中的节点选项（用于冗余组表单）。 */
+const nodeOptions = computed(() =>
+  Object.values(nodesById.value).sort((left, right) => left.id - right.id),
+)
+
+/** 备用节点候选：排除已选主节点。 */
+const standbyOptions = computed(() =>
+  nodeOptions.value.filter((node) => node.id !== groupForm.primaryId),
+)
+
+const standbyMode = computed(() => isStandbyTopology(groupForm.redundancyType))
+
 const selectedEdge = computed(() =>
   selectedEdgeId.value === null
     ? null
@@ -80,17 +132,24 @@ const selectedEdgeDescription = computed(() => {
 // --------------------------------------------------------------------------- //
 // 数据映射
 // --------------------------------------------------------------------------- //
+function buildNodeData(node: ApiNode): FlowNodeData {
+  const redundancy = roleByNodeId.value[node.id]
+  return {
+    label: node.name,
+    nodeType: node.type,
+    status: node.status,
+    description: node.description,
+    redundancyRole: redundancy?.role ?? null,
+    redundancyGroupName: redundancy?.groupName ?? null,
+  }
+}
+
 function toFlowNode(node: ApiNode): Node<FlowNodeData> {
   return {
     id: String(node.id),
     type: 'topology',
     position: { x: node.position_x, y: node.position_y },
-    data: {
-      label: node.name,
-      nodeType: node.type,
-      status: node.status,
-      description: node.description,
-    },
+    data: buildNodeData(node),
   }
 }
 
@@ -99,40 +158,109 @@ function toFlowEdge(edge: TopologyEdge): Edge<FlowEdgeData> {
     id: `edge-${edge.id}`,
     source: String(edge.source_node_id),
     target: String(edge.target_node_id),
-    data: { edgeId: edge.id, description: edge.description },
+    markerEnd: MarkerType.ArrowClosed,
+    data: { kind: 'dependency', edgeId: edge.id, description: edge.description },
   }
+}
+
+/** 根据后端冗余组生成可视化连线（主节点 → 备用节点，紫色虚线）。 */
+function buildRedundancyEdges(groups: RedundancyGroup[]): Edge<FlowEdgeData>[] {
+  const edges: Edge<FlowEdgeData>[] = []
+  for (const group of groups) {
+    const label = `${group.name}（${redundancyTypeMeta(group.redundancy_type).label}）`
+    const primary = group.members.find((member) => member.member_role === 'primary')
+    const standbys = group.members
+      .filter((member) => member.member_role === 'standby')
+      .sort((left, right) => (left.priority ?? 0) - (right.priority ?? 0) || left.id - right.id)
+
+    const share = {
+      animated: true,
+      selectable: false,
+      markerEnd: MarkerType.ArrowClosed,
+      style: { stroke: REDUNDANCY_EDGE_COLOR, strokeDasharray: '6 4', strokeWidth: 2 },
+    }
+
+    if (primary) {
+      for (const standby of standbys) {
+        edges.push({
+          ...share,
+          id: `redundancy-${group.id}-${standby.id}`,
+          source: String(primary.node_id),
+          target: String(standby.node_id),
+          data: { kind: 'redundancy', redundancyGroupId: group.id, redundancyLabel: label },
+        })
+      }
+    }
+
+    // 双活模式：成员两两相连，表示互为对等冗余
+    const actives = group.members
+      .filter((member) => member.member_role === 'active')
+      .sort((left, right) => left.id - right.id)
+    for (let index = 1; index < actives.length; index += 1) {
+      edges.push({
+        ...share,
+        id: `redundancy-${group.id}-${actives[0].id}-${actives[index].id}`,
+        source: String(actives[0].node_id),
+        target: String(actives[index].node_id),
+        data: { kind: 'redundancy', redundancyGroupId: group.id, redundancyLabel: label },
+      })
+    }
+  }
+  return edges
+}
+
+function rebuildFlowEdges() {
+  const dependencies = (topology.value?.edges ?? []).map(toFlowEdge)
+  flowEdges.value = [...dependencies, ...buildRedundancyEdges(redundancyGroups.value)]
 }
 
 function syncFlowNodeData(node: ApiNode) {
   flowNodes.value = flowNodes.value.map((item) =>
-    item.id === String(node.id)
-      ? {
-          ...item,
-          data: {
-            label: node.name,
-            nodeType: node.type,
-            status: node.status,
-            description: node.description,
-          },
-        }
-      : item,
+    item.id === String(node.id) ? { ...item, data: buildNodeData(node) } : item,
   )
+}
+
+function applyGroupRoles(groups: RedundancyGroup[]) {
+  redundancyGroups.value = groups
+  const mapping: Record<number, { role: MemberRole; groupName: string }> = {}
+  for (const group of groups) {
+    for (const member of group.members) {
+      mapping[member.node_id] = { role: member.member_role, groupName: group.name }
+    }
+  }
+  roleByNodeId.value = mapping
+  // 同步节点上的冗余徽标
+  flowNodes.value = flowNodes.value.map((item) => {
+    const node = nodesById.value[Number(item.id)]
+    return node ? { ...item, data: buildNodeData(node) } : item
+  })
 }
 
 // --------------------------------------------------------------------------- //
 // 加载
 // --------------------------------------------------------------------------- //
+async function loadGroups() {
+  try {
+    const { data } = await redundancyApi.list(topologyId.value)
+    applyGroupRoles(data)
+  } catch {
+    applyGroupRoles([])
+  }
+  rebuildFlowEdges()
+}
+
 async function loadTopology() {
   loading.value = true
   loadError.value = ''
   try {
     const { data } = await topologyApi.detail(topologyId.value)
     topology.value = data
-    flowNodes.value = data.nodes.map(toFlowNode)
-    flowEdges.value = data.edges.map(toFlowEdge)
     nodesById.value = Object.fromEntries(data.nodes.map((node) => [node.id, node]))
+    roleByNodeId.value = {}
+    flowNodes.value = data.nodes.map(toFlowNode)
     selectedNodeId.value = null
     selectedEdgeId.value = null
+    await loadGroups()
   } catch (error) {
     loadError.value = extractErrorMessage(error, '加载拓扑失败')
   } finally {
@@ -240,11 +368,15 @@ async function removeSelectedNode() {
   try {
     await topologyApi.removeNode(topology.value.id, id)
     flowNodes.value = flowNodes.value.filter((item) => item.id !== String(id))
-    flowEdges.value = flowEdges.value.filter(
-      (edge) => edge.source !== String(id) && edge.target !== String(id),
-    )
     delete nodesById.value[id]
     selectedNodeId.value = null
+    if (topology.value) {
+      topology.value.edges = topology.value.edges.filter(
+        (edge) => edge.source_node_id !== id && edge.target_node_id !== id,
+      )
+    }
+    // 后端会同步清理该节点的冗余成员（并可能删除失效的冗余组），重新拉取
+    await loadGroups()
     ElMessage.success('节点已删除')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '删除节点失败'))
@@ -323,7 +455,8 @@ async function onConnect(connection: Connection) {
       source_node_id: sourceId,
       target_node_id: targetId,
     })
-    flowEdges.value = [...flowEdges.value, toFlowEdge(data)]
+    topology.value.edges = [...topology.value.edges, data]
+    rebuildFlowEdges()
     ElMessage.success('依赖关系已创建')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '创建依赖关系失败'))
@@ -335,7 +468,8 @@ async function removeSelectedEdge() {
   const edgeId = selectedEdgeId.value
   try {
     await topologyApi.removeEdge(topology.value.id, edgeId)
-    flowEdges.value = flowEdges.value.filter((edge) => edge.data?.edgeId !== edgeId)
+    topology.value.edges = topology.value.edges.filter((edge) => edge.id !== edgeId)
+    rebuildFlowEdges()
     selectedEdgeId.value = null
     ElMessage.success('依赖关系已删除')
   } catch (error) {
@@ -365,6 +499,148 @@ async function renameTopology() {
     ElMessage.success('拓扑名称已更新')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '更新拓扑名称失败'))
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// 冗余关系（显式主备 / 双活）
+// --------------------------------------------------------------------------- //
+function resetGroupForm() {
+  groupForm.name = ''
+  groupForm.redundancyType = 'active_standby'
+  groupForm.description = ''
+  groupForm.primaryId = null
+  groupForm.standbyIds = []
+  groupForm.standbyPriorities = {}
+  groupForm.activeIds = []
+}
+
+function openCreateGroup() {
+  editingGroupId.value = null
+  resetGroupForm()
+  groupForm.name = `冗余组 ${redundancyGroups.value.length + 1}`
+  groupDialogVisible.value = true
+}
+
+function openEditGroup(group: RedundancyGroup) {
+  editingGroupId.value = group.id
+  resetGroupForm()
+  groupForm.name = group.name
+  groupForm.redundancyType = group.redundancy_type
+  groupForm.description = group.description ?? ''
+
+  const primary = group.members.find((member) => member.member_role === 'primary')
+  const standbys = group.members.filter((member) => member.member_role === 'standby')
+  groupForm.primaryId = primary?.node_id ?? null
+  groupForm.standbyIds = standbys.map((member) => member.node_id)
+  const priorities: Record<number, number> = {}
+  standbys.forEach((member, index) => {
+    priorities[member.node_id] = member.priority ?? index + 1
+  })
+  groupForm.standbyPriorities = priorities
+  groupForm.activeIds = group.members
+    .filter((member) => member.member_role === 'active')
+    .map((member) => member.node_id)
+  groupDialogVisible.value = true
+}
+
+function onGroupTypeChange() {
+  groupForm.primaryId = null
+  groupForm.standbyIds = []
+  groupForm.standbyPriorities = {}
+  groupForm.activeIds = []
+}
+
+function onStandbySelectionChange() {
+  const next: Record<number, number> = {}
+  groupForm.standbyIds.forEach((nodeId, index) => {
+    next[nodeId] = groupForm.standbyPriorities[nodeId] ?? index + 1
+  })
+  groupForm.standbyPriorities = next
+}
+
+function buildGroupPayload(): RedundancyGroupPayload | null {
+  if (!groupForm.name.trim()) {
+    ElMessage.warning('请填写冗余组名称')
+    return null
+  }
+
+  const members: RedundancyMemberPayload[] = []
+  if (standbyMode.value) {
+    if (groupForm.primaryId === null) {
+      ElMessage.warning('请选择主节点')
+      return null
+    }
+    if (groupForm.standbyIds.length === 0) {
+      ElMessage.warning('请至少选择一个备用节点')
+      return null
+    }
+    members.push({ node_id: groupForm.primaryId, member_role: 'primary', priority: null })
+    for (const nodeId of groupForm.standbyIds) {
+      members.push({
+        node_id: nodeId,
+        member_role: 'standby',
+        priority: groupForm.standbyPriorities[nodeId] ?? null,
+      })
+    }
+  } else {
+    if (groupForm.activeIds.length < 2) {
+      ElMessage.warning('双活模式至少需要两个成员')
+      return null
+    }
+    for (const nodeId of groupForm.activeIds) {
+      members.push({ node_id: nodeId, member_role: 'active', priority: null })
+    }
+  }
+
+  return {
+    name: groupForm.name.trim(),
+    redundancy_type: groupForm.redundancyType,
+    description: groupForm.description.trim() || null,
+    members,
+  }
+}
+
+async function submitGroupForm() {
+  if (!topology.value) return
+  const payload = buildGroupPayload()
+  if (!payload) return
+
+  savingGroup.value = true
+  try {
+    if (editingGroupId.value === null) {
+      await redundancyApi.create(topology.value.id, payload)
+      ElMessage.success('冗余组已创建')
+    } else {
+      await redundancyApi.update(editingGroupId.value, payload)
+      ElMessage.success('冗余组已更新')
+    }
+    groupDialogVisible.value = false
+    await loadGroups()
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '保存冗余组失败'))
+  } finally {
+    savingGroup.value = false
+  }
+}
+
+async function removeGroup(group: RedundancyGroup) {
+  try {
+    await ElMessageBox.confirm(
+      `确认删除冗余组「${group.name}」？删除后 failover 将不再认为存在该备用节点。`,
+      '删除冗余组',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+
+  try {
+    await redundancyApi.remove(group.id)
+    ElMessage.success('冗余组已删除')
+    await loadGroups()
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '删除冗余组失败'))
   }
 }
 
@@ -404,6 +680,8 @@ onMounted(loadTopology)
       操作提示：点击下方按钮添加节点；拖动节点调整位置（松手即自动保存）；
       从节点<strong>底部</strong>圆点拖到另一节点<strong>顶部</strong>圆点创建依赖
       （<strong>箭头方向 = 依赖方向</strong>：A → B 表示 A 依赖 B）；点击节点或连线可在右侧编辑或删除。
+      冗余关系（主备 / 双活）是<strong>独立于依赖边</strong>的声明，用于恢复策略的备用节点判定，
+      可在右侧「冗余关系」区域创建。
     </p>
 
     <div class="editor-body">
@@ -431,6 +709,21 @@ onMounted(loadTopology)
             当前拓扑还没有节点，点击上方节点按钮开始添加
           </div>
         </div>
+
+        <div class="editor-legend">
+          <span class="legend-item">
+            <span class="legend-line is-dependency"></span>普通依赖关系（实线箭头，箭头指向被依赖方）
+          </span>
+          <span class="legend-item">
+            <span class="legend-line is-redundancy"></span>主备关系（紫色虚线，主节点 → 备用节点）
+          </span>
+          <span class="legend-item">
+            <span class="legend-badge is-primary">主节点</span>冗余组主节点
+          </span>
+          <span class="legend-item">
+            <span class="legend-badge is-standby">备用节点</span>冗余组备用节点
+          </span>
+        </div>
       </div>
 
       <aside class="editor-inspector">
@@ -449,6 +742,59 @@ onMounted(loadTopology)
               {{ item.label }}
             </button>
           </div>
+        </div>
+
+        <el-divider />
+
+        <div class="inspector-tools">
+          <div class="inspector-tools-head">
+            <p class="inspector-label">冗余关系</p>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :disabled="flowNodes.length < 2"
+              @click="openCreateGroup"
+            >
+              新建冗余组
+            </el-button>
+          </div>
+          <p v-if="redundancyGroups.length === 0" class="inspector-desc cm-muted">
+            尚未声明冗余关系。failover（备用节点切换）只认可显式主备关系，
+            不会根据「同类型节点」自动推断备用节点。
+          </p>
+          <ul v-else class="group-list">
+            <li v-for="group in redundancyGroups" :key="group.id" class="group-item">
+              <div class="group-item-head">
+                <span class="group-name">{{ group.name }}</span>
+                <span
+                  class="group-type"
+                  :style="{ color: redundancyTypeMeta(group.redundancy_type).color }"
+                >
+                  {{ redundancyTypeMeta(group.redundancy_type).label }}
+                </span>
+              </div>
+              <div class="group-members">
+                <span
+                  v-for="member in group.members"
+                  :key="member.id"
+                  class="group-member"
+                  :style="{ borderColor: memberRoleMeta(member.member_role).color }"
+                >
+                  {{ memberRoleMeta(member.member_role).label }}：{{ member.node_name }}
+                  <template v-if="member.priority !== null">（P{{ member.priority }}）</template>
+                </span>
+              </div>
+              <div class="group-actions">
+                <el-button link type="primary" size="small" @click="openEditGroup(group)">
+                  编辑
+                </el-button>
+                <el-button link type="danger" size="small" @click="removeGroup(group)">
+                  删除
+                </el-button>
+              </div>
+            </li>
+          </ul>
         </div>
 
         <el-divider />
@@ -514,6 +860,116 @@ onMounted(loadTopology)
         </template>
       </aside>
     </div>
+
+    <el-dialog
+      v-model="groupDialogVisible"
+      :title="editingGroupId === null ? '新建冗余组' : '编辑冗余组'"
+      width="540px"
+    >
+      <el-form label-position="top" @submit.prevent>
+        <el-form-item label="名称">
+          <el-input v-model="groupForm.name" maxlength="128" />
+        </el-form-item>
+        <el-form-item label="冗余模式">
+          <el-select
+            v-model="groupForm.redundancyType"
+            class="inspector-full"
+            @change="onGroupTypeChange"
+          >
+            <el-option
+              v-for="item in REDUNDANCY_TYPES"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+
+        <template v-if="standbyMode">
+          <el-form-item label="主节点">
+            <el-select
+              v-model="groupForm.primaryId"
+              class="inspector-full"
+              placeholder="选择主节点"
+            >
+              <el-option
+                v-for="node in nodeOptions"
+                :key="node.id"
+                :label="`${node.name}（${nodeTypeLabel(node.type)}）`"
+                :value="node.id"
+              />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="备用节点（可多选）">
+            <el-select
+              v-model="groupForm.standbyIds"
+              class="inspector-full"
+              multiple
+              placeholder="选择备用节点"
+              @change="onStandbySelectionChange"
+            >
+              <el-option
+                v-for="node in standbyOptions"
+                :key="node.id"
+                :label="`${node.name}（${nodeTypeLabel(node.type)}）`"
+                :value="node.id"
+              />
+            </el-select>
+          </el-form-item>
+          <div v-if="groupForm.standbyIds.length > 0" class="priority-list">
+            <p class="inspector-label">备用优先级（数值越小越优先）</p>
+            <div
+              v-for="nodeId in groupForm.standbyIds"
+              :key="nodeId"
+              class="priority-row"
+            >
+              <span class="priority-name">{{ nodesById[nodeId]?.name ?? `节点#${nodeId}` }}</span>
+              <el-input-number
+                v-model="groupForm.standbyPriorities[nodeId]"
+                :min="0"
+                :step="1"
+                size="small"
+              />
+            </div>
+          </div>
+        </template>
+
+        <template v-else>
+          <el-form-item label="双活成员（至少两个）">
+            <el-select
+              v-model="groupForm.activeIds"
+              class="inspector-full"
+              multiple
+              placeholder="选择双活成员"
+            >
+              <el-option
+                v-for="node in nodeOptions"
+                :key="node.id"
+                :label="`${node.name}（${nodeTypeLabel(node.type)}）`"
+                :value="node.id"
+              />
+            </el-select>
+          </el-form-item>
+        </template>
+
+        <el-form-item label="说明">
+          <el-input v-model="groupForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+      </el-form>
+
+      <p class="dialog-hint">
+        冗余关系与依赖边（业务调用方向）相互独立：依赖边进入传播分析，冗余关系进入恢复策略。
+        当前版本一个节点最多属于一个冗余组，且不会执行真实切流，
+        也不校验真实容量、网络与数据同步。
+      </p>
+
+      <template #footer>
+        <el-button @click="groupDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="savingGroup" @click="submitGroupForm">
+          保存
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -659,6 +1115,153 @@ onMounted(loadTopology)
 .inspector-desc {
   margin-top: 10px;
   font-size: 13px;
+  line-height: 1.7;
+  color: var(--cm-text-secondary);
+}
+
+.inspector-tools-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.editor-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-top: 12px;
+  font-size: 12.5px;
+  color: var(--cm-text-secondary);
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 34px;
+  height: 0;
+  border-top-width: 2px;
+  border-top-style: solid;
+}
+
+.legend-line.is-dependency {
+  border-top-color: #94a3b8;
+}
+
+.legend-line.is-redundancy {
+  border-top-style: dashed;
+  border-top-color: v-bind(REDUNDANCY_EDGE_COLOR);
+}
+
+.legend-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px dashed currentColor;
+  background: #faf7ff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.legend-badge.is-primary {
+  color: #7c3aed;
+}
+
+.legend-badge.is-standby {
+  color: #0ea5e9;
+}
+
+.group-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.group-item {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px dashed #c4b5fd;
+  background: #faf8ff;
+}
+
+.group-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.group-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #0f172a;
+  word-break: break-all;
+}
+
+.group-type {
+  font-size: 11.5px;
+  font-weight: 600;
+  flex: none;
+}
+
+.group-members {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.group-member {
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--cm-border);
+  background: #fff;
+  font-size: 11.5px;
+  color: var(--cm-text-secondary);
+}
+
+.group-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.priority-list {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--cm-primary-soft);
+}
+
+.priority-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.priority-name {
+  color: var(--cm-text-secondary);
+  word-break: break-all;
+}
+
+.dialog-hint {
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--cm-primary-soft);
+  font-size: 12px;
   line-height: 1.7;
   color: var(--cm-text-secondary);
 }

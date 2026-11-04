@@ -10,10 +10,12 @@
 | 第二阶段 | 系统拓扑管理与数据建模（拓扑 / 节点 / 依赖 CRUD + Vue Flow 编辑器） | ✅ 已完成 |
 | 第三阶段 | 故障注入、故障传播分析算法与传播可视化 | ✅ 已完成 |
 | 第四阶段 | 恢复策略优化、策略对比与推演历史记录管理 | ✅ 已完成 |
+| 第五阶段 | 显式冗余关系建模与真实备用节点识别（`failover` 不再按节点类型推断） | ✅ 已完成 |
 
 已实现的功能均可通过真实后端 API 操作并持久化到 SQLite；前端各页面数据均来自真实接口，
 不含演示假数据。恢复策略的恢复时间、成本、影响节点数与评分均为**规则模拟估算值**，
-不是生产环境测量值；完整的冗余关系建模、真实执行恢复动作等仍未实现（详见
+不是生产环境测量值；备用节点是否可用也仅由当前模拟模型的规则判定，
+**不执行真实切流、不校验真实容量 / 网络 / 数据同步**，真实执行恢复动作等仍未实现（详见
 [`docs/技术方案.md`](docs/技术方案.md) 的「尚未实现」章节）。
 
 ## 依赖方向约定（重要）
@@ -46,8 +48,10 @@
 | 恢复策略对比页面（指标对比、评分明细、推荐理由） | ✅ 已实现 |
 | 推演历史分页查询与单条详情回看（含故障源快照） | ✅ 已实现 |
 | 历史记录页面（真实分页接口 + 详情弹窗） | ✅ 已实现 |
-| 显式冗余 / 备用节点关系建模 | 🚧 待开发（当前用「同类型未受影响节点」保守推断） |
-| 真实执行恢复动作、对接真实云平台 | 🚧 待开发（当前仅输出策略与模拟估算） |
+| 显式冗余关系（冗余组 / 成员）的建模、约束校验与 CRUD | ✅ 已实现 |
+| 拓扑编辑器中的冗余可视化（主备徽标、紫色虚线、图例）与冗余组管理 | ✅ 已实现 |
+| `failover` 基于显式冗余关系与前置条件检查选择备用节点 | ✅ 已实现 |
+| 真实执行恢复动作、真实切流、对接真实云平台 | 🚧 待开发（当前仅输出策略与模拟估算） |
 
 ### 节点类型
 
@@ -80,6 +84,42 @@
 - 距离 1 为 `direct`，距离 ≥ 2 为 `indirect`；故障源本身不计入受影响节点。
 - 结果完全由「拓扑 + 故障记录」决定，**不含随机数、不调用大模型**，可复现。
 
+## 显式冗余关系（与依赖关系不同）
+
+> **依赖关系**（`topology_edge`）描述业务调用方向，是**故障传播分析**的输入。
+> **冗余关系**（`redundancy_group` / `redundancy_member`）描述「谁能顶替谁」，
+> 是**恢复策略 `failover`** 的输入。两者语义独立：冗余关系不参与传播计算，
+> 依赖边也不代表冗余能力。
+
+- 冗余模式：`active_standby`（主备，优先支持）、`active_active`（双活）、
+  `manual_standby`（手动备用，结构同主备）。
+- 成员角色：`primary`（主节点）、`standby`（备用节点）、`active`（双活成员）。
+- **创建接口一次提交完整结构**：主节点 + 若干备用节点及其 `priority`，无需分多次提交。
+- 结构约束：主备 / 手动备用模式必须有且只有一个主节点、至少一个备用节点，
+  且备用节点必须明确指定 `priority`；双活模式至少两个 `active` 成员。
+- **当前版本限制**：同一拓扑内一个节点最多属于一个冗余组（跨组复用返回 `409`）。
+- 删除节点时自动清理其成员行；若冗余组因此不再满足模式约束（例如主节点被删除），
+  该冗余组会被一并删除，避免残留语义不完整的冗余关系。
+- 删除拓扑时级联删除冗余组与成员。
+
+### 备用节点选择规则（`failover`）
+
+`failover` **只**使用显式冗余关系，已彻底移除「同类型且未受影响节点」的推断逻辑。
+逐个故障源节点校验：
+
+1. 故障源属于某个显式冗余组（`active_standby` / `manual_standby`）；
+2. 故障源是该组的主节点；
+3. 该组存在备用节点，且每个备用节点满足：自身无激活故障、未被本次传播分析判定为受影响、
+   节点类型与主节点相容、不存在明显的依赖故障风险、`priority` 已明确。
+
+任一条件不满足即返回 `applicable=false` 并给出具体原因。多个可用备用节点时，
+按 `priority` 升序（**数值越小优先级越高**）选择，优先级相同时按 `node_id` 升序作为
+稳定的次级规则；其余列为 `standby_candidates`。全程**不使用随机数**。
+
+> `standby_candidates[].eligible = true` 只表示当前虚拟推演模型的规则判定它满足切换前提，
+> **不代表真实生产环境已验证容量、网络连通性、数据同步与配置一致性**。
+> 当前版本不执行真实切流，也不进行真实健康探测。
+
 ## 恢复策略优化
 
 实现于 `backend/app/services/recovery_service.py`（独立 Service），参数集中在
@@ -88,12 +128,15 @@
 | 策略类型 | 适用条件 | 估算恢复时间 | 资源成本 | 基础风险 |
 | --- | --- | --- | --- | --- |
 | `restart_service`（服务重启） | 存在 `node_down` / `service_unavailable` 类故障 | `120 + 60 × 可重启节点数` 秒 | 低 | 中 |
-| `failover`（备用节点切换） | 每个故障节点都有可用同类型备用节点 | `60 + 30 × 故障节点数` 秒 | 高 | 低 |
+| `failover`（备用节点切换） | 故障主节点属于显式冗余组，且组内存在满足前置条件的备用节点 | `60 + 30 × 故障节点数` 秒 | 高 | 低 |
 | `isolate_node`（故障节点隔离） | 隔离后用户入口仍保留可用依赖 | `30 + 15 × 故障节点数` 秒 | 低 | 低 / 中 |
 
-- **备用节点不做虚构**：当前没有显式冗余关系模型，`failover` 仅在拓扑中存在
-  「同类型且不在故障源 / 影响范围内」的节点时判定为适用，否则返回 `applicable=false`
-  并给出具体缺失原因。
+- **备用节点不做虚构**：`failover` 仅认可显式冗余关系。故障节点没有冗余组、
+  该组没有备用节点、或备用节点自身故障 / 受传播影响 / 类型不相容 / 存在故障依赖时，
+  返回 `applicable=false` 并给出具体缺失原因，不虚构备用服务器。
+  结果额外返回 `redundancy_group_id`、`redundancy_group_name`、`primary_node_id`、
+  `selected_standby_node_id`、`standby_candidates`、`selection_reason` 与
+  `prerequisite_checks`（逐项 `check_name` / `passed` / `detail`）。
 - **隔离不保证业务恢复**：若隔离会让某个 `user_entry` 节点失去全部直接依赖，
   该策略直接判定为**不适用**且风险为 `high`，永远不会被推荐。
 - **评分模型**（可解释的加权规则，权重写入代码与文档）：
@@ -134,32 +177,38 @@ CloudMirror-Deduction/
 │   │   │   ├── topologies.py        # 拓扑 / 节点 / 依赖接口
 │   │   │   ├── faults.py            # 故障注入 / 查询 / 恢复 / 传播分析接口
 │   │   │   ├── analyses.py          # 推演历史列表 / 详情接口
-│   │   │   └── recovery.py          # 恢复策略推荐 / 策略配置接口
+│   │   │   ├── recovery.py          # 恢复策略推荐 / 策略配置接口
+│   │   │   └── redundancy.py        # 冗余组创建 / 列表 / 详情 / 更新 / 删除
 │   │   ├── models/
 │   │   │   ├── topology.py          # Topology / TopologyNode / TopologyEdge
 │   │   │   ├── fault.py             # FaultEvent
 │   │   │   ├── analysis.py          # PropagationAnalysis + 故障源 / 受影响节点 / 路径子表
-│   │   │   └── recovery.py          # RecoveryPlan / RecoveryStrategy / RecoveryStrategyNote
+│   │   │   ├── recovery.py          # RecoveryPlan / RecoveryStrategy / 备注与备用候选 / 前置检查子表
+│   │   │   └── redundancy.py        # RedundancyGroup / RedundancyMember（显式冗余关系）
 │   │   ├── schemas/
 │   │   │   ├── topology.py          # Pydantic Schema 与枚举
 │   │   │   ├── fault.py             # 故障类型 / 严重程度 / 状态枚举
 │   │   │   ├── analysis.py          # 分析请求 / 结果 / 历史分页 Schema
-│   │   │   └── recovery.py          # 恢复策略请求 / 响应 Schema
+│   │   │   ├── recovery.py          # 恢复策略请求 / 响应 Schema
+│   │   │   └── redundancy.py        # 冗余模式 / 成员角色 / 冗余组 Schema
 │   │   └── services/
 │   │       ├── exceptions.py        # NotFoundError / ConflictError 等
 │   │       ├── topology_service.py  # 拓扑业务逻辑
 │   │       ├── fault_service.py     # 故障注入 / 恢复业务逻辑
 │   │       ├── propagation_service.py  # 故障传播分析算法（多源 BFS）+ 历史查询
 │   │       ├── recovery_config.py   # 策略参数 / 评分权重 / 文案
-│   │       └── recovery_service.py  # 恢复策略评估与推荐
+│   │       ├── recovery_service.py  # 恢复策略评估与推荐（failover 基于显式冗余）
+│   │       └── redundancy_service.py # 冗余组校验与 CRUD / 备用节点查询
 │   ├── tests/
 │   │   ├── conftest.py              # 独立测试数据库与夹具
-│   │   ├── test_health.py
+│   │   ├── test_health.py           # 3 个
 │   │   ├── test_topology.py         # 22 个拓扑测试
 │   │   ├── test_faults.py           # 16 个故障测试
 │   │   ├── test_propagation.py      # 15 个传播算法测试
 │   │   ├── test_recovery.py         # 16 个恢复策略测试
-│   │   └── test_analysis_history.py # 10 个历史记录测试（共 82 个）
+│   │   ├── test_analysis_history.py # 10 个历史记录测试
+│   │   ├── test_redundancy.py       # 18 个冗余关系 CRUD / 约束测试
+│   │   └── test_failover_redundancy.py  # 13 个基于显式冗余的 failover 测试（共 113 个）
 │   ├── requirements.txt
 │   ├── pytest.ini
 │   └── .env.example
@@ -174,18 +223,20 @@ CloudMirror-Deduction/
 │   │   │   ├── topology.ts          # 拓扑接口封装与类型
 │   │   │   ├── fault.ts             # 故障注入 / 恢复接口
 │   │   │   ├── analysis.ts          # 传播分析 / 历史列表 / 历史详情接口
-│   │   │   └── recovery.ts          # 恢复策略推荐 / 策略配置接口
-│   │   ├── components/TopologyNode.vue   # Vue Flow 自定义节点（支持传播高亮）
+│   │   │   ├── recovery.ts          # 恢复策略推荐 / 策略配置接口
+│   │   │   └── redundancy.ts        # 冗余组 CRUD 接口与类型
+│   │   ├── components/TopologyNode.vue   # Vue Flow 自定义节点（支持传播高亮 + 冗余徽标）
 │   │   ├── constants/
 │   │   │   ├── topology.ts          # 节点类型 / 状态元数据
 │   │   │   ├── fault.ts             # 故障类型 / 严重程度 / 影响等级配色
-│   │   │   └── recovery.ts          # 策略类型 / 成本 / 风险标签与配色
+│   │   │   ├── recovery.ts          # 策略类型 / 成本 / 风险标签与配色
+│   │   │   └── redundancy.ts        # 冗余模式 / 成员角色元数据与连线配色
 │   │   ├── router/index.ts
 │   │   ├── styles/main.css
 │   │   └── views/
 │   │       ├── Dashboard.vue
 │   │       ├── Topology.vue          # 拓扑列表（增删 + 进入编辑）
-│   │       ├── TopologyEditor.vue    # Vue Flow 拓扑编辑器
+│   │       ├── TopologyEditor.vue    # Vue Flow 拓扑编辑器（含冗余关系管理 + 图例）
 │   │       ├── FaultSimulation.vue   # 故障模拟 + 传播可视化
 │   │       ├── Recovery.vue          # 恢复策略对比与推荐
 │   │       └── History.vue           # 推演历史分页列表 + 详情弹窗
@@ -232,7 +283,7 @@ npm run dev
 ### 3. 测试与构建
 
 ```bash
-cd backend && pytest          # 后端测试（82 个）
+cd backend && pytest          # 后端测试（113 个）
 cd frontend && npm run build  # 前端类型检查 + 生产构建
 ```
 
@@ -259,11 +310,18 @@ cd frontend && npm run build  # 前端类型检查 + 生产构建
 | GET | `/api/topologies/{id}/analyses/{analysis_id}` | 读取单次历史分析详情 |
 | POST | `/api/topologies/{id}/recovery/recommend` | 生成恢复策略并推荐（body 可选 `analysis_id`） |
 | GET | `/api/topologies/{id}/recovery/strategies` | 查询策略类型、估算参数与评分权重 |
+| POST | `/api/topologies/{id}/redundancy-groups` | 创建冗余组（一次提交完整主备结构） |
+| GET | `/api/topologies/{id}/redundancy-groups` | 查询拓扑的冗余组列表 |
+| GET | `/api/redundancy-groups/{group_id}` | 查询冗余组详情 |
+| PUT | `/api/redundancy-groups/{group_id}` | 更新冗余组（可整体替换成员） |
+| DELETE | `/api/redundancy-groups/{group_id}` | 删除冗余组 |
 | GET | `/api/faults/{fault_id}` | 查询故障详情 |
 | POST | `/api/faults/{fault_id}/recover` | 恢复故障 |
 
-错误约定：资源不存在 / 分析不属于该拓扑 → `404`；名称重复 / 重复边 / 重复的同类激活故障 → `409`；
-自依赖、指定已恢复故障参与分析、分析无激活故障源时请求恢复策略 → `400`；请求体校验失败 → `422`。
+错误约定：资源不存在 / 分析不属于该拓扑 / 跨拓扑节点 → `404`；
+名称重复 / 重复边 / 重复的同类激活故障 / 同一节点重复入组 / 一个节点加入多个冗余组 → `409`；
+自依赖、指定已恢复故障参与分析、分析无激活故障源时请求恢复策略、
+冗余组结构不合法（缺主节点 / 缺备用节点 / 备用无优先级） → `400`；请求体校验失败 → `422`。
 所有错误均返回带中文说明的 `{"detail": "..."}`。
 
 > 传播算法的完整说明（方向、环路、多源、去重）见 [`docs/项目说明.md`](docs/项目说明.md)；
@@ -284,6 +342,14 @@ cd frontend && npm run build  # 前端类型检查 + 生产构建
 | `recovery_plan` | 一次策略推荐：`topology_id`(FK)、`analysis_id`(FK, 置空保留)、`recommended_strategy_id`(软引用)、`recommendation_reason`、`estimation_notice`、`created_at` |
 | `recovery_strategy` | 策略评估：`plan_id`(FK, 级联)、`strategy_type`、`applicable`、`inapplicable_reason`、估算指标、`risk_level`、`recommendation_score` |
 | `recovery_strategy_note` | 策略条目：`strategy_id`(FK, 级联)、`kind`(advantage/disadvantage/prerequisite)、`position`、`content` |
+| `redundancy_group` | 冗余组：`id`、`topology_id`(FK, 级联)、`name`、`redundancy_type`、`description`、`created_at`、`updated_at` |
+| `redundancy_member` | 冗余成员：`id`、`redundancy_group_id`(FK, 级联)、`node_id`(FK `topology_node`, 级联)、`member_role`、`priority`、`created_at`；唯一约束 (group_id, node_id) |
+| `recovery_standby_candidate` | `failover` 备用候选：`strategy_id`(FK, 级联)、`position`、`node_id`(软引用)、`node_name`、`priority`、`eligible`、`detail` |
+| `recovery_prerequisite_check` | `failover` 前置检查：`strategy_id`(FK, 级联)、`position`、`check_name`、`passed`、`detail` |
+
+`recovery_strategy` 同时保存 `failover` 的显式冗余结果：`redundancy_group_id`、
+`redundancy_group_name`、`primary_node_id`、`selected_standby_node_id`、`selection_reason`
+（均使用整数**软引用**，保证删除冗余组或节点后历史仍可读）。
 
 数据库初始化使用 `create_all`，**幂等**：重复启动不会清空或重建已有数据。
 

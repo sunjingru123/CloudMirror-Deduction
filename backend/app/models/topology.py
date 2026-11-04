@@ -32,6 +32,7 @@ from app.core.database import Base
 if TYPE_CHECKING:  # pragma: no cover - 仅供类型检查
     from app.models.analysis import PropagationAnalysis
     from app.models.fault import FaultEvent
+    from app.models.redundancy import RedundancyGroup
 
 
 def utcnow() -> datetime:
@@ -68,6 +69,12 @@ class Topology(Base):
         passive_deletes=True,
     )
     analyses: Mapped[list["PropagationAnalysis"]] = relationship(
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+    # 冗余关系（显式主备 / 双活声明），与依赖边语义不同，见 models/redundancy.py
+    redundancy_groups: Mapped[list["RedundancyGroup"]] = relationship(
+        back_populates="topology",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )

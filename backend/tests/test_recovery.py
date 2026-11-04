@@ -3,14 +3,17 @@
 覆盖：
 
 1. 正常进程级故障可以生成「服务重启」策略并被推荐
-2. 缺少备用节点时「备用节点切换」不适用（并给出原因）
-3. 存在明确同类型备用节点时才考虑切换策略
+2. 缺少显式冗余关系时「备用节点切换」不适用（并给出原因）
+3. 存在显式冗余组与可用备用节点时才考虑切换策略
 4. 高风险隔离策略（用户入口失去全部依赖）不能被推荐
 5. 策略评分可复现（相同输入 → 相同输出）
 6. 不适用策略不能被选为推荐策略
 7. 错误 / 跨拓扑 analysis_id 返回明确错误
 8. 无分析记录、无激活故障源时返回明确错误
 9. 策略配置接口返回权重与估算参数
+
+冗余关系本身的 CRUD 与约束校验见 `tests/test_redundancy.py`；
+基于显式冗余的 failover 适用性检查见 `tests/test_failover_redundancy.py`。
 """
 
 from fastapi.testclient import TestClient
@@ -149,8 +152,30 @@ def test_failover_inapplicable_without_standby(client: TestClient) -> None:
 
     assert failover["applicable"] is False
     assert failover["inapplicable_reason"] is not None
-    assert "缺少备用节点" in failover["inapplicable_reason"]
+    # Phase 5 起：failover 只认可显式冗余关系，不再按同类型节点推断
+    assert "显式冗余关系" in failover["inapplicable_reason"]
     assert result["recommended_strategy_type"] != "failover"
+
+
+def _redundancy_group(
+    client: TestClient,
+    topology_id: int,
+    name: str,
+    primary: int,
+    standbys: list[tuple[int, int]],
+) -> int:
+    """创建 active_standby 冗余组：standbys 为 (node_id, priority) 列表。"""
+    members = [{"node_id": primary, "member_role": "primary"}]
+    members += [
+        {"node_id": node_id, "member_role": "standby", "priority": priority}
+        for node_id, priority in standbys
+    ]
+    response = client.post(
+        f"{BASE}/{topology_id}/redundancy-groups",
+        json={"name": name, "redundancy_type": "active_standby", "members": members},
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
 
 
 def test_failover_applicable_with_standby(client: TestClient) -> None:
@@ -163,6 +188,10 @@ def test_failover_applicable_with_standby(client: TestClient) -> None:
     _edge(client, topology_id, app, db_primary)
     _edge(client, topology_id, app, db_standby)
 
+    group_id = _redundancy_group(
+        client, topology_id, "数据库主备组", db_primary, [(db_standby, 1)]
+    )
+
     _fault(client, topology_id, db_primary, "node_down")
     analysis = _analyze(client, topology_id)
 
@@ -173,6 +202,13 @@ def test_failover_applicable_with_standby(client: TestClient) -> None:
     assert failover["inapplicable_reason"] is None
     assert failover["estimated_resource_cost"] == "high"
     assert failover["risk_level"] == "low"
+    # 显式冗余信息随结果返回
+    assert failover["redundancy_group_id"] == group_id
+    assert failover["redundancy_group_name"] == "数据库主备组"
+    assert failover["primary_node_id"] == db_primary
+    assert failover["selected_standby_node_id"] == db_standby
+    assert failover["selection_reason"] is not None
+    assert any(item["passed"] for item in failover["prerequisite_checks"])
     # 备用节点存在时，切换的业务恢复度更高，应被推荐
     assert result["recommended_strategy_type"] == "failover"
 

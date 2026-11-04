@@ -449,6 +449,62 @@ onMounted(loadTopologies)
           <p v-if="!strategy.applicable" class="rc-detail-warning">
             不适用：{{ strategy.inapplicable_reason }}
           </p>
+
+          <div
+            v-if="strategy.strategy_type === 'failover' && strategy.prerequisite_checks.length > 0"
+            class="rc-redundancy"
+          >
+            <div class="rc-redundancy-head">
+              <span class="rc-redundancy-label">显式冗余判定</span>
+              <span v-if="strategy.redundancy_group_name" class="rc-redundancy-group">
+                冗余组「{{ strategy.redundancy_group_name }}」#{{ strategy.redundancy_group_id }}
+              </span>
+              <span v-else class="rc-redundancy-group is-muted">未关联显式冗余组</span>
+            </div>
+
+            <p v-if="strategy.selection_reason" class="rc-redundancy-reason">
+              {{ strategy.selection_reason }}
+            </p>
+
+            <div v-if="strategy.standby_candidates.length > 0" class="rc-sub">
+              <span class="rc-sub-label">备用节点候选（按 priority 升序，数值越小越优先）</span>
+              <ul class="rc-candidates">
+                <li
+                  v-for="candidate in strategy.standby_candidates"
+                  :key="`candidate-${candidate.node_id}`"
+                  class="rc-candidate"
+                  :class="{ 'is-eligible': candidate.eligible }"
+                >
+                  <span
+                    class="rc-candidate-dot"
+                    :style="{ background: candidate.eligible ? '#16a34a' : '#dc2626' }"
+                  ></span>
+                  <span class="rc-candidate-name">{{ candidate.node_name }}</span>
+                  <span v-if="candidate.priority !== null" class="rc-candidate-priority">
+                    P{{ candidate.priority }}
+                  </span>
+                  <span class="rc-candidate-detail">{{ candidate.detail }}</span>
+                </li>
+              </ul>
+            </div>
+
+            <div class="rc-sub">
+              <span class="rc-sub-label">前置条件检查</span>
+              <ul class="rc-checks">
+                <li
+                  v-for="(check, index) in strategy.prerequisite_checks"
+                  :key="`check-${index}`"
+                  class="rc-check"
+                >
+                  <span class="rc-check-flag" :class="check.passed ? 'is-ok' : 'is-fail'">
+                    {{ check.passed ? '✓' : '✕' }}
+                  </span>
+                  <span class="rc-check-name">{{ check.check_name }}</span>
+                  <span class="rc-check-detail">{{ check.detail }}</span>
+                </li>
+              </ul>
+            </div>
+          </div>
           <div class="rc-detail-columns">
             <div class="rc-detail-col">
               <h4>优势</h4>
@@ -895,6 +951,123 @@ onMounted(loadTopologies)
   font-size: 13px;
   color: #b45309;
   line-height: 1.7;
+}
+
+.rc-redundancy {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px dashed #c4b5fd;
+  background: #faf8ff;
+}
+
+.rc-redundancy-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.rc-redundancy-label {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: #7c3aed;
+}
+
+.rc-redundancy-group {
+  font-size: 12.5px;
+  color: var(--cm-text-secondary);
+}
+
+.rc-redundancy-group.is-muted {
+  color: var(--cm-text-muted);
+}
+
+.rc-redundancy-reason {
+  margin-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--cm-text-secondary);
+}
+
+.rc-sub {
+  margin-top: 12px;
+}
+
+.rc-sub-label {
+  display: block;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--cm-text-muted);
+}
+
+.rc-candidates,
+.rc-checks {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rc-candidate,
+.rc-check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid var(--cm-border);
+  font-size: 12.5px;
+}
+
+.rc-candidate.is-eligible {
+  border-color: #86efac;
+}
+
+.rc-candidate-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.rc-candidate-name,
+.rc-check-name {
+  font-weight: 600;
+  color: var(--cm-text);
+}
+
+.rc-candidate-priority {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--cm-primary-soft);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--cm-primary);
+}
+
+.rc-candidate-detail,
+.rc-check-detail {
+  color: var(--cm-text-secondary);
+  flex: 1 1 240px;
+}
+
+.rc-check-flag {
+  font-weight: 700;
+}
+
+.rc-check-flag.is-ok {
+  color: #16a34a;
+}
+
+.rc-check-flag.is-fail {
+  color: #dc2626;
 }
 
 .rc-detail-columns {

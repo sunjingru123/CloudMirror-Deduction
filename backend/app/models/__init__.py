@@ -10,7 +10,14 @@ from app.models.analysis import (
     PropagationAnalysis,
 )
 from app.models.fault import FaultEvent
-from app.models.recovery import RecoveryPlan, RecoveryStrategy, RecoveryStrategyNote
+from app.models.recovery import (
+    RecoveryPlan,
+    RecoveryPrerequisiteCheck,
+    RecoveryStandbyCandidate,
+    RecoveryStrategy,
+    RecoveryStrategyNote,
+)
+from app.models.redundancy import RedundancyGroup, RedundancyMember
 from app.models.topology import Topology, TopologyEdge, TopologyNode
 
 __all__ = [
@@ -25,4 +32,8 @@ __all__ = [
     "RecoveryPlan",
     "RecoveryStrategy",
     "RecoveryStrategyNote",
+    "RecoveryStandbyCandidate",
+    "RecoveryPrerequisiteCheck",
+    "RedundancyGroup",
+    "RedundancyMember",
 ]

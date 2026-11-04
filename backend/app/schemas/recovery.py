@@ -50,6 +50,28 @@ class RecoveryRequest(BaseModel):
     )
 
 
+class PrerequisiteCheck(BaseModel):
+    """单项前置条件检查结果。"""
+
+    check_name: str
+    passed: bool
+    detail: str
+
+
+class StandbyCandidateRead(BaseModel):
+    """一个被评估的备用节点候选。
+
+    `eligible=True` 仅表示当前模拟模型的规则判定它满足切换前提，
+    不代表真实生产环境已验证容量、网络、数据同步与配置一致性。
+    """
+
+    node_id: int | None
+    node_name: str
+    priority: int | None = Field(None, description="数值越小优先级越高")
+    eligible: bool
+    detail: str
+
+
 class RecoveryStrategyRead(BaseModel):
     """单个策略的评估结果。"""
 
@@ -69,6 +91,21 @@ class RecoveryStrategyRead(BaseModel):
     disadvantages: list[str] = Field(default_factory=list)
     prerequisites: list[str] = Field(default_factory=list)
     recommendation_score: float = Field(..., description="规则加权评分（0-100，模拟估算值）")
+
+    # --- 仅 failover 策略会填充的显式冗余字段，其余策略为空 ---
+    redundancy_group_id: int | None = Field(None, description="所选显式冗余组 ID")
+    redundancy_group_name: str | None = Field(None, description="所选显式冗余组名称")
+    primary_node_id: int | None = Field(None, description="发生故障的主节点 ID")
+    selected_standby_node_id: int | None = Field(
+        None, description="被选中的备用节点 ID（按优先级选定）"
+    )
+    standby_candidates: list[StandbyCandidateRead] = Field(
+        default_factory=list, description="评估过的备用节点候选（含是否可用）"
+    )
+    selection_reason: str | None = Field(None, description="备用节点选择理由")
+    prerequisite_checks: list[PrerequisiteCheck] = Field(
+        default_factory=list, description="逐项前置条件检查结果"
+    )
 
 
 class RecoveryRecommendation(BaseModel):

@@ -9,6 +9,28 @@ export type ResourceCost = 'low' | 'medium' | 'high'
 /** 操作风险等级。 */
 export type RiskLevel = 'low' | 'medium' | 'high'
 
+/** 单项前置条件检查结果（目前仅 failover 使用）。 */
+export interface PrerequisiteCheck {
+  check_name: string
+  passed: boolean
+  detail: string
+}
+
+/**
+ * 一个被评估的备用节点候选。
+ *
+ * `eligible=true` 仅表示当前模拟模型的规则判定它满足切换前提，
+ * 不代表真实生产环境已验证容量、网络、数据同步与配置一致性。
+ */
+export interface StandbyCandidate {
+  node_id: number | null
+  node_name: string
+  /** 数值越小优先级越高 */
+  priority: number | null
+  eligible: boolean
+  detail: string
+}
+
 /** 单个策略的评估结果。 */
 export interface RecoveryStrategy {
   strategy_id: number
@@ -28,6 +50,15 @@ export interface RecoveryStrategy {
   prerequisites: string[]
   /** 规则加权评分（0-100，模拟估算值） */
   recommendation_score: number
+
+  /* --- 仅 failover 会填充的显式冗余字段 --- */
+  redundancy_group_id: number | null
+  redundancy_group_name: string | null
+  primary_node_id: number | null
+  selected_standby_node_id: number | null
+  standby_candidates: StandbyCandidate[]
+  selection_reason: string | null
+  prerequisite_checks: PrerequisiteCheck[]
 }
 
 /** 一次恢复策略推荐的完整结果。 */

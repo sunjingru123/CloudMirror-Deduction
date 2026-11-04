@@ -24,6 +24,7 @@ from app.schemas.topology import (
     TopologyRead,
     TopologyUpdate,
 )
+from app.services import redundancy_service
 from app.services.exceptions import ConflictError, InvalidOperationError, NotFoundError
 
 
@@ -213,7 +214,7 @@ def update_node(
 
 
 def delete_node(db: Session, topology_id: int, node_id: int) -> None:
-    """删除节点，并级联删除与其相关的依赖关系。"""
+    """删除节点，并级联删除与其相关的依赖关系与冗余成员。"""
     node = _get_node_or_404(db, topology_id, node_id)
     db.query(TopologyEdge).filter(
         or_(
@@ -221,6 +222,8 @@ def delete_node(db: Session, topology_id: int, node_id: int) -> None:
             TopologyEdge.target_node_id == node.id,
         )
     ).delete(synchronize_session=False)
+    # 清理冗余成员：若某个冗余组因此不再满足模式约束，则该组一并删除
+    redundancy_service.cleanup_node_references(db, topology_id, node.id)
     db.delete(node)
     db.commit()
 

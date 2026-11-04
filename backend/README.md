@@ -4,14 +4,19 @@
 
 > 当前阶段：已实现健康检查、**系统拓扑管理**（拓扑 / 节点 / 依赖的完整 CRUD 与持久化）、
 > **故障注入与恢复**、**故障传播分析算法**（多源 BFS + 反向传播 + 环路安全）、
-> **恢复策略评估与推荐**（重启 / 切换 / 隔离，含适用性与规则评分），以
-> 及**推演历史分页查询与详情回看**。
-> 恢复时间与成本均为**规则模拟估算值**，不是生产测量数据；真实执行恢复动作尚未实现。
+> **恢复策略评估与推荐**（重启 / 切换 / 隔离，含适用性与规则评分）、
+> **推演历史分页查询与详情回看**，以及**显式冗余关系建模**（冗余组 / 成员，
+> 使 `failover` 基于真实备用节点判定）。
+> 恢复时间与成本均为**规则模拟估算值**，不是生产测量数据；备用节点「可用」仅为模拟判定，
+> 不执行真实切流，也不校验真实容量 / 网络 / 数据同步；真实执行恢复动作尚未实现。
 
 ## 依赖方向约定
 
 > **边 `A → B` 表示「A 依赖 B」**：`source_node_id = A`（依赖方）、`target_node_id = B`（被依赖方）。
 > 故障传播方向相反：B 故障时 A 可能受影响。
+
+> **冗余关系是独立概念**：`redundancy_group` / `redundancy_member` 描述「谁能顶替谁」，
+> 与依赖边无关，不参与传播计算，仅用于恢复策略 `failover` 的备用节点判定。
 
 ## 目录结构
 
@@ -28,24 +33,28 @@ backend/
 │   │   ├── topologies.py    # 拓扑 / 节点 / 依赖接口
 │   │   ├── faults.py        # 故障注入 / 恢复 / 传播分析接口
 │   │   ├── analyses.py      # 推演历史列表 / 详情接口
-│   │   └── recovery.py      # 恢复策略推荐 / 策略配置接口
+│   │   ├── recovery.py      # 恢复策略推荐 / 策略配置接口
+│   │   └── redundancy.py    # 冗余组创建 / 列表 / 详情 / 更新 / 删除
 │   ├── models/
 │   │   ├── topology.py      # Topology / TopologyNode / TopologyEdge
 │   │   ├── fault.py         # FaultEvent
 │   │   ├── analysis.py      # PropagationAnalysis + 子表
-│   │   └── recovery.py      # RecoveryPlan / RecoveryStrategy / RecoveryStrategyNote
+│   │   ├── recovery.py      # RecoveryPlan / RecoveryStrategy / 子表（备注 / 备用候选 / 前置检查）
+│   │   └── redundancy.py    # RedundancyGroup / RedundancyMember
 │   ├── schemas/
 │   │   ├── topology.py      # Pydantic Schema 与枚举
 │   │   ├── fault.py         # 故障枚举与 Schema
 │   │   ├── analysis.py      # 分析请求 / 结果 / 历史分页 Schema
-│   │   └── recovery.py      # 恢复策略请求 / 响应 Schema
+│   │   ├── recovery.py      # 恢复策略请求 / 响应 Schema
+│   │   └── redundancy.py    # 冗余模式 / 成员角色 / 冗余组 Schema
 │   └── services/
 │       ├── exceptions.py    # 业务异常（404 / 409 / 400）
 │       ├── topology_service.py
 │       ├── fault_service.py        # 故障注入 / 恢复
 │       ├── propagation_service.py  # 传播分析算法（多源 BFS）+ 历史查询
 │       ├── recovery_config.py      # 策略参数 / 评分权重
-│       └── recovery_service.py     # 恢复策略评估与推荐
+│       ├── recovery_service.py     # 恢复策略评估与推荐（failover 基于显式冗余）
+│       └── redundancy_service.py   # 冗余组校验与 CRUD / 备用节点查询
 ├── tests/
 │   ├── conftest.py          # 独立测试数据库与夹具
 │   ├── test_health.py
@@ -53,7 +62,9 @@ backend/
 │   ├── test_faults.py
 │   ├── test_propagation.py
 │   ├── test_recovery.py
-│   └── test_analysis_history.py
+│   ├── test_analysis_history.py
+│   ├── test_redundancy.py           # 冗余关系 CRUD / 约束
+│   └── test_failover_redundancy.py  # 基于显式冗余的 failover
 ├── requirements.txt
 ├── pytest.ini
 ├── .env.example
@@ -87,7 +98,8 @@ pytest
 ```
 
 测试使用独立的数据库文件（`_test_cloudmirror.db`，测试结束后自动删除），不会影响开发数据。
-当前共 **82** 个用例（健康检查 3 + 拓扑 22 + 故障 16 + 传播算法 15 + 恢复策略 16 + 历史记录 10）。
+当前共 **113** 个用例：健康检查 3 + 拓扑 22 + 故障 16 + 传播算法 15 + 恢复策略 16 +
+历史记录 10 + 冗余关系 18 + failover 显式冗余 13。
 
 ## 配置
 
@@ -123,6 +135,11 @@ pytest
 | GET | `/api/topologies/{id}/analyses/{analysis_id}` | 读取单次历史分析详情 |
 | POST | `/api/topologies/{id}/recovery/recommend` | 生成恢复策略并推荐（body 可选 `analysis_id`） |
 | GET | `/api/topologies/{id}/recovery/strategies` | 策略类型、估算参数与评分权重 |
+| POST | `/api/topologies/{id}/redundancy-groups` | 创建冗余组（一次提交完整主备结构） |
+| GET | `/api/topologies/{id}/redundancy-groups` | 查询拓扑的冗余组列表 |
+| GET | `/api/redundancy-groups/{group_id}` | 查询冗余组详情 |
+| PUT | `/api/redundancy-groups/{group_id}` | 更新冗余组 |
+| DELETE | `/api/redundancy-groups/{group_id}` | 删除冗余组 |
 | GET | `/api/faults/{fault_id}` | 查询故障详情 |
 | POST | `/api/faults/{fault_id}/recover` | 恢复故障 |
 | GET | `/` | 项目信息与文档入口（不在接口文档中展示） |
@@ -140,10 +157,27 @@ pytest
 
 - 实现于 `app/services/recovery_service.py`，参数与权重在 `app/services/recovery_config.py`。
 - 输入为「拓扑 + 一次传播分析结果」，输出三类策略的适用性、估算指标与推荐。
-- 备用节点不虚构：拓扑中存在「同类型、未受影响的节点」才判定 `failover` 适用。
+- 备用节点不虚构：`failover` **只**认可显式冗余关系（见下节），
+  不再按「同类型节点」推断；不满足前置条件时返回 `applicable=false` 并说明原因。
 - 隔离若会让用户入口失去全部依赖，则判定为不适用且风险 `high`，不被推荐。
 - 评分为可解释的加权规则（恢复时间 0.25 / 影响范围 0.20 / 成本 0.15 / 风险 0.20 /
   业务恢复程度 0.20），不含随机数，结果可复现。详见 `docs/技术方案.md`。
+
+## 显式冗余关系与 failover
+
+- 模型：`redundancy_group`（冗余组）/ `redundancy_member`（成员），
+  模式 `active_standby` / `active_active` / `manual_standby`，
+  角色 `primary` / `standby` / `active`。实现于 `app/services/redundancy_service.py`。
+- 约束：成员必须属于本拓扑；同一节点不在同组重复；主备 / 手动备用必须 1 主 ≥1 备，
+  备用必须指定 `priority`；双活至少两个 `active`；**当前一个节点最多属于一个冗余组**。
+- 删除节点时清理其成员行，若组因此不满足模式约束（如丢失主节点）则整组删除。
+- `failover` **只**使用显式冗余：故障源需属于冗余组且为主节点，备用节点需无激活故障、
+  未被传播影响、类型相容、无故障依赖且已明确优先级；多个可用备用节点按 `priority` 升序
+  （数值越小越优先）选择，优先级相同按 `node_id` 升序，**不使用随机数**。
+- 结果额外返回 `redundancy_group_id`、`redundancy_group_name`、`primary_node_id`、
+  `selected_standby_node_id`、`standby_candidates`、`selection_reason` 与 `prerequisite_checks`。
+- **提醒**：备用节点「可用」仅为模拟模型判定，不执行真实切流，
+  也不校验真实容量 / 网络 / 数据同步 / 配置一致性。详见 `docs/技术方案.md`。
 
 ## 数据库表
 
@@ -155,7 +189,9 @@ pytest
 - `analysis_fault_source` / `analysis_affected_node` / `analysis_path_step`：
   分析结果的规范化子表（故障源快照、受影响节点、传播路径步骤），不使用无约束 JSON 大字段。
 - `recovery_plan`：一次策略推荐（关联分析与拓扑，记录推荐策略与理由）。
-- `recovery_strategy`：每种策略的评估结果（适用性、估算指标、风险、评分）。
+- `recovery_strategy`：每种策略的评估结果（适用性、估算指标、风险、评分、failover 冗余字段）。
 - `recovery_strategy_note`：策略的优势 / 劣势 / 前置条件条目（有序子表）。
+- `recovery_standby_candidate` / `recovery_prerequisite_check`：failover 的备用候选与前置检查（有序子表）。
+- `redundancy_group` / `redundancy_member`：显式冗余关系（与依赖边语义不同）。
 
 初始化使用 `create_all`，幂等，不会清空已有数据。

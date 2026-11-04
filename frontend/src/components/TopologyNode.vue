@@ -3,9 +3,11 @@ import { computed } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 
 import type { NodeStatus, NodeType } from '@/api/topology'
+import type { MemberRole } from '@/api/redundancy'
 import { nodeStatusMeta, nodeTypeMeta } from '@/constants/topology'
 import { FAULT_SOURCE_COLOR, IMPACT_LEVELS } from '@/constants/fault'
 import type { NodeImpact } from '@/constants/fault'
+import { memberRoleMeta } from '@/constants/redundancy'
 
 export interface TopologyNodeData {
   label: string
@@ -16,6 +18,10 @@ export interface TopologyNodeData {
   impact?: NodeImpact | null
   /** 传播距离（0 表示故障源）。 */
   distance?: number | null
+  /** 冗余角色（显式冗余关系，可选）。 */
+  redundancyRole?: MemberRole | null
+  /** 冗余组名称（用于徽标提示）。 */
+  redundancyGroupName?: string | null
 }
 
 const props = defineProps<{
@@ -26,6 +32,12 @@ const props = defineProps<{
 const typeMeta = computed(() => nodeTypeMeta(props.data.nodeType))
 const statusMeta = computed(() => nodeStatusMeta(props.data.status))
 const label = computed(() => props.data.label)
+
+const redundancyMeta = computed(() => {
+  const role = props.data.redundancyRole
+  if (!role) return null
+  return memberRoleMeta(role)
+})
 
 const impactMeta = computed(() => {
   const impact = props.data.impact
@@ -56,6 +68,19 @@ const impactMeta = computed(() => {
     </header>
 
     <div class="tn-name">{{ label }}</div>
+
+    <div
+      v-if="redundancyMeta"
+      class="tn-redundancy"
+      :style="{ color: redundancyMeta.color, borderColor: redundancyMeta.color }"
+      :title="props.data.redundancyGroupName ?? undefined"
+    >
+      <i class="tn-redundancy-dot" :style="{ background: redundancyMeta.color }"></i>
+      {{ redundancyMeta.label }}
+      <span v-if="props.data.redundancyGroupName" class="tn-redundancy-group">
+        · {{ props.data.redundancyGroupName }}
+      </span>
+    </div>
 
     <div v-if="impactMeta" class="tn-impact" :style="{ color: impactMeta.color }">
       <i class="tn-impact-dot" :style="{ background: impactMeta.color }"></i>
@@ -143,6 +168,35 @@ const impactMeta = computed(() => {
   margin-top: 6px;
   font-size: 10.5px;
   font-weight: 700;
+}
+
+.tn-redundancy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px dashed currentColor;
+  background: #faf7ff;
+  font-size: 10.5px;
+  font-weight: 700;
+  max-width: 100%;
+}
+
+.tn-redundancy-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.tn-redundancy-group {
+  font-weight: 500;
+  opacity: 0.85;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tn-impact-dot {

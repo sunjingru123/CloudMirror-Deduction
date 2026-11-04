@@ -29,12 +29,26 @@
 
 边 `source_node_id = A`、`target_node_id = B` 表示 **A 依赖 B**。
 因此「依赖 B 的节点」为边集合中 `target_node_id == B` 的 `source_node_id`。
+
+备用节点来源
+------------
+
+`failover` 的备用节点**只**来自显式冗余组（`redundancy_group` /
+`redundancy_member`），不再使用「同类型且未受影响节点」的推断规则。
+备用节点选择与适用性检查规则见 `_evaluate_failover` 与
+`services/redundancy_service.py`。
 """
 
 from sqlalchemy.orm import Session
 
 from app.models.analysis import PropagationAnalysis
-from app.models.recovery import RecoveryPlan, RecoveryStrategy, RecoveryStrategyNote
+from app.models.recovery import (
+    RecoveryPlan,
+    RecoveryPrerequisiteCheck,
+    RecoveryStandbyCandidate,
+    RecoveryStrategy,
+    RecoveryStrategyNote,
+)
 from app.models.topology import Topology, TopologyEdge, TopologyNode
 from app.schemas.analysis import AnalysisResult
 from app.schemas.recovery import (
@@ -45,12 +59,18 @@ from app.schemas.recovery import (
     ResourceCost,
     RiskLevel,
     ScoringWeights,
+    StandbyCandidateRead,
     StrategyConfigResponse,
     StrategyTypeInfo,
 )
+from app.schemas.redundancy import MemberRole, RedundancyType
+from app.schemas.topology import NodeStatus
 from app.services import propagation_service
 from app.services import recovery_config as cfg
+from app.services import redundancy_service
+from app.services import fault_service
 from app.services.exceptions import InvalidOperationError, NotFoundError
+from app.services.redundancy_service import RedundancyGroupInfo, RedundancyMemberInfo
 
 COST_LABELS: dict[str, str] = {
     ResourceCost.LOW.value: "低",
@@ -62,6 +82,9 @@ RISK_LABELS: dict[str, str] = {
     RiskLevel.MEDIUM.value: "中",
     RiskLevel.HIGH.value: "高",
 }
+
+PRIMARY = MemberRole.PRIMARY.value
+STANDBY = MemberRole.STANDBY.value
 
 # 用于「隔离会切断用户入口全部依赖」判断的节点类型
 USER_ENTRY_NODE_TYPE = "user_entry"
@@ -184,10 +207,11 @@ def _make_strategy(
     cost: str,
     risk: str,
     total_nodes: int,
+    extra: dict | None = None,
 ) -> dict:
     config = cfg.STRATEGY_CONFIG[strategy_type]
     notes = cfg.STRATEGY_NOTES[strategy_type]
-    return {
+    result = {
         "strategy_type": strategy_type,
         "strategy_name": config["strategy_name"],
         "description": config["description"],
@@ -203,7 +227,18 @@ def _make_strategy(
         "advantages": list(notes["advantages"]),
         "disadvantages": list(notes["disadvantages"]),
         "prerequisites": list(notes["prerequisites"]),
+        # 仅 failover 会填充的显式冗余字段
+        "redundancy_group_id": None,
+        "redundancy_group_name": None,
+        "primary_node_id": None,
+        "selected_standby_node_id": None,
+        "standby_candidates": [],
+        "selection_reason": None,
+        "prerequisite_checks": [],
     }
+    if extra:
+        result.update(extra)
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -239,41 +274,235 @@ def _evaluate_restart(
     )
 
 
+def _check(check_name: str, passed: bool, detail: str) -> dict:
+    """构造一条前置条件检查结果。"""
+    return {"check_name": check_name, "passed": passed, "detail": detail}
+
+
 def _evaluate_failover(
     faulty_node_ids: list[int],
     nodes: list[TopologyNode],
     affected_node_ids: set[int],
     total_nodes: int,
+    groups_by_node: dict[int, RedundancyGroupInfo],
+    dependency_map: dict[int, list[int]],
+    active_fault_node_ids: set[int],
 ) -> dict:
-    """备用节点切换：必须逐个故障节点确认存在可用备用节点。"""
-    config = cfg.STRATEGY_CONFIG[RecoveryStrategyType.FAILOVER.value]
-    faulty_set = set(faulty_node_ids)
-    nodes_by_id = {node.id: node for node in nodes}
+    """备用节点切换：**只**基于显式冗余组，不再按「同类型节点」推断。
 
+    适用条件（逐个故障源节点校验，全部满足才适用）：
+
+    1. 故障源节点属于某个显式冗余组（`active_standby` / `manual_standby`）；
+    2. 故障源节点是该组的主节点（`primary`）；
+    3. 该组存在备用节点（`standby`），且每个备用节点都满足：
+       - 自身没有激活故障；
+       - 未被本次传播分析判定为受影响；
+       - 节点类型与主节点相容；
+       - 不存在明显的依赖故障风险（其直接依赖不在故障源 / 受影响集合中）；
+       - 优先级已明确。
+
+    若有多个可用备用节点，按 `priority` 升序（数值越小优先级越高）选择，
+    优先级相同时按 `node_id` 升序作为稳定的次级规则；其余列为备选。全程不使用随机数。
+    """
+    config = cfg.STRATEGY_CONFIG[RecoveryStrategyType.FAILOVER.value]
+    nodes_by_id = {node.id: node for node in nodes}
+    faulty_set = set(faulty_node_ids)
+
+    checks: list[dict] = []
+    candidates: list[dict] = []
+    # (primary_node_id, primary_name, standby_id, standby_name, priority)
+    selections: list[tuple[int, str, int, str, int | None]] = []
     missing: list[str] = []
+    first_group: RedundancyGroupInfo | None = None
+
     for node_id in faulty_node_ids:
         node = nodes_by_id.get(node_id)
         if node is None:
-            missing.append(f"节点(id={node_id})")
+            checks.append(_check("是否存在显式主备关系", False, f"节点(id={node_id})不存在"))
+            missing.append(f"节点(id={node_id})：节点不存在")
             continue
-        standby_exists = any(
-            other.id != node.id
-            and other.type == node.type
-            and other.id not in faulty_set
-            and other.id not in affected_node_ids
-            for other in nodes
-        )
-        if not standby_exists:
-            missing.append(f"节点「{node.name}」")
 
-    applicable = len(missing) == 0
-    reason = None
-    if not applicable:
-        reason = (
-            "缺少备用节点或冗余关系信息，无法执行切换："
-            + "、".join(missing)
-            + " 不存在可用的同类型备用节点"
+        group = groups_by_node.get(node_id)
+        if group is None:
+            checks.append(
+                _check(
+                    "是否存在显式主备关系",
+                    False,
+                    f"节点「{node.name}」不属于任何显式冗余组，无法确定备用节点",
+                )
+            )
+            missing.append(f"节点「{node.name}」：没有显式冗余关系")
+            continue
+
+        checks.append(
+            _check(
+                "是否存在显式主备关系",
+                True,
+                f"节点「{node.name}」属于冗余组「{group.group_name}」"
+                f"（{group.redundancy_type}）",
+            )
         )
+        if first_group is None:
+            first_group = group
+
+        if group.redundancy_type == RedundancyType.ACTIVE_ACTIVE.value:
+            checks.append(
+                _check(
+                    "冗余模式是否支持切换",
+                    False,
+                    f"冗余组「{group.group_name}」为双活模式（active_active），"
+                    "当前版本不为双活生成主备切换方案",
+                )
+            )
+            missing.append(f"节点「{node.name}」：冗余组为双活模式，不支持主备切换")
+            continue
+
+        primaries = group.by_role(PRIMARY)
+        if not primaries or primaries[0].node_id != node_id:
+            checks.append(
+                _check(
+                    "故障节点是否为主节点",
+                    False,
+                    f"节点「{node.name}」不是冗余组「{group.group_name}」的主节点",
+                )
+            )
+            missing.append(f"节点「{node.name}」：不是该冗余组的主节点")
+            continue
+
+        checks.append(
+            _check(
+                "故障节点是否为主节点",
+                True,
+                f"节点「{node.name}」是冗余组「{group.group_name}」的主节点",
+            )
+        )
+
+        # 按 priority 升序（越小越优先），相同优先级按 node_id 升序保证稳定
+        standbys = sorted(
+            group.by_role(STANDBY),
+            key=lambda item: (
+                item.priority if item.priority is not None else 10**6,
+                item.node_id,
+            ),
+        )
+        if not standbys:
+            checks.append(
+                _check(
+                    "冗余组是否存在备用节点",
+                    False,
+                    f"冗余组「{group.group_name}」没有备用节点",
+                )
+            )
+            missing.append(f"节点「{node.name}」：冗余组没有备用节点")
+            continue
+
+        checks.append(
+            _check(
+                "冗余组是否存在备用节点",
+                True,
+                f"冗余组「{group.group_name}」包含 {len(standbys)} 个备用节点",
+            )
+        )
+
+        eligible: list[RedundancyMemberInfo] = []
+        for standby in standbys:
+            bad_deps = sorted(
+                dep
+                for dep in dependency_map.get(standby.node_id, [])
+                if dep in faulty_set or dep in affected_node_ids
+            )
+            standby_checks = [
+                _check(
+                    "备用节点是否正常",
+                    standby.node_status == NodeStatus.HEALTHY.value,
+                    f"备用节点「{standby.node_name}」当前节点状态为 {standby.node_status}",
+                ),
+                _check(
+                    "备用节点是否存在激活故障",
+                    standby.node_id not in active_fault_node_ids,
+                    f"备用节点「{standby.node_name}」"
+                    + (
+                        "存在激活故障"
+                        if standby.node_id in active_fault_node_ids
+                        else "没有激活故障"
+                    ),
+                ),
+                _check(
+                    "备用节点是否受到传播影响",
+                    standby.node_id not in affected_node_ids,
+                    f"备用节点「{standby.node_name}」"
+                    + (
+                        "在本次传播影响范围内"
+                        if standby.node_id in affected_node_ids
+                        else "不在本次传播影响范围内"
+                    ),
+                ),
+                _check(
+                    "是否满足节点类型要求",
+                    standby.node_type == node.type,
+                    f"备用节点类型 {standby.node_type}，主节点类型 {node.type}",
+                ),
+                _check(
+                    "备用节点是否存在故障依赖",
+                    not bad_deps,
+                    (
+                        f"备用节点「{standby.node_name}」的直接依赖中包含故障 / 受影响节点"
+                        f"（node_id={bad_deps}）"
+                        if bad_deps
+                        else f"备用节点「{standby.node_name}」没有明显的依赖故障风险"
+                    ),
+                ),
+                _check(
+                    "备用节点优先级是否明确",
+                    standby.priority is not None,
+                    f"备用节点「{standby.node_name}」优先级为 {standby.priority}",
+                ),
+            ]
+            passed = all(item["passed"] for item in standby_checks)
+            checks.extend(standby_checks)
+
+            failed_names = [item["check_name"] for item in standby_checks if not item["passed"]]
+            candidates.append(
+                {
+                    "node_id": standby.node_id,
+                    "node_name": standby.node_name,
+                    "priority": standby.priority,
+                    "eligible": passed,
+                    "detail": (
+                        "满足切换前提（模拟判定）"
+                        if passed
+                        else "不满足切换前提：" + "、".join(failed_names)
+                    ),
+                }
+            )
+            if passed:
+                eligible.append(standby)
+
+        if eligible:
+            chosen = eligible[0]
+            selections.append(
+                (node.id, node.name, chosen.node_id, chosen.node_name, chosen.priority)
+            )
+        else:
+            missing.append(f"节点「{node.name}」：冗余组内没有满足切换前提的备用节点")
+
+    applicable = not missing and len(selections) == len(faulty_node_ids)
+    reason = None
+    selection_reason = None
+    if applicable:
+        parts = [
+            f"将主节点「{primary_name}」切换到备用节点「{standby_name}」"
+            + (f"（priority={priority}）" if priority is not None else "")
+            for _, primary_name, _, standby_name, priority in selections
+        ]
+        selection_reason = (
+            "按优先级（数值越小越优先）选择备用节点，优先级相同时按 node_id 升序："
+            + "；".join(parts)
+            + "。"
+            + cfg.FAILOVER_AVAILABILITY_NOTICE
+        )
+    else:
+        reason = "未找到可用的显式备用节点，无法执行切换：" + "；".join(missing)
 
     recovery_time = config["base_recovery_seconds"] + config["per_node_seconds"] * len(
         faulty_node_ids
@@ -287,6 +516,19 @@ def _evaluate_failover(
         cost=config["base_resource_cost"],
         risk=config["base_risk_level"],
         total_nodes=total_nodes,
+        extra={
+            "redundancy_group_id": first_group.group_id if first_group else None,
+            "redundancy_group_name": first_group.group_name if first_group else None,
+            "primary_node_id": (
+                selections[0][0]
+                if selections
+                else (faulty_node_ids[0] if faulty_node_ids else None)
+            ),
+            "selected_standby_node_id": selections[0][2] if selections else None,
+            "standby_candidates": candidates,
+            "selection_reason": selection_reason,
+            "prerequisite_checks": checks,
+        },
     )
 
 
@@ -436,6 +678,11 @@ def _persist(
             estimated_resource_cost=item["estimated_resource_cost"],
             risk_level=item["risk_level"],
             recommendation_score=item["recommendation_score"],
+            redundancy_group_id=item.get("redundancy_group_id"),
+            redundancy_group_name=item.get("redundancy_group_name"),
+            primary_node_id=item.get("primary_node_id"),
+            selected_standby_node_id=item.get("selected_standby_node_id"),
+            selection_reason=item.get("selection_reason"),
         )
         db.add(row)
         db.flush()
@@ -455,6 +702,30 @@ def _persist(
                         content=content,
                     )
                 )
+
+        for position, candidate in enumerate(item.get("standby_candidates") or []):
+            db.add(
+                RecoveryStandbyCandidate(
+                    strategy_id=row.id,
+                    position=position,
+                    node_id=candidate["node_id"],
+                    node_name=candidate["node_name"],
+                    priority=candidate["priority"],
+                    eligible=candidate["eligible"],
+                    detail=candidate["detail"],
+                )
+            )
+
+        for position, check in enumerate(item.get("prerequisite_checks") or []):
+            db.add(
+                RecoveryPrerequisiteCheck(
+                    strategy_id=row.id,
+                    position=position,
+                    check_name=check["check_name"],
+                    passed=check["passed"],
+                    detail=check["detail"],
+                )
+            )
 
     if recommended is not None:
         plan.recommended_strategy_id = rows[recommended["strategy_type"]].id
@@ -497,9 +768,24 @@ def recommend(
     dependency_map = _build_dependency_map(edges)
     dependents_map = _build_dependents_map(edges)
 
+    # 显式冗余关系与当前激活故障：仅用于 failover 策略
+    groups_by_node = redundancy_service.load_groups_for_recovery(db, topology_id)
+    active_fault_node_ids = {
+        fault.source_node_id
+        for fault in fault_service.list_active_faults(db, topology_id)
+    }
+
     strategies = [
         _evaluate_restart(faulty_types, total_nodes),
-        _evaluate_failover(faulty_node_ids, nodes, affected_node_ids, total_nodes),
+        _evaluate_failover(
+            faulty_node_ids,
+            nodes,
+            affected_node_ids,
+            total_nodes,
+            groups_by_node,
+            dependency_map,
+            active_fault_node_ids,
+        ),
         _evaluate_isolate(
             faulty_node_ids, nodes, dependency_map, dependents_map, total_nodes
         ),
@@ -536,6 +822,22 @@ def recommend(
             disadvantages=item["disadvantages"],
             prerequisites=item["prerequisites"],
             recommendation_score=item["recommendation_score"],
+            redundancy_group_id=item.get("redundancy_group_id"),
+            redundancy_group_name=item.get("redundancy_group_name"),
+            primary_node_id=item.get("primary_node_id"),
+            selected_standby_node_id=item.get("selected_standby_node_id"),
+            standby_candidates=[
+                StandbyCandidateRead(
+                    node_id=candidate["node_id"],
+                    node_name=candidate["node_name"],
+                    priority=candidate["priority"],
+                    eligible=candidate["eligible"],
+                    detail=candidate["detail"],
+                )
+                for candidate in item.get("standby_candidates") or []
+            ],
+            selection_reason=item.get("selection_reason"),
+            prerequisite_checks=list(item.get("prerequisite_checks") or []),
         )
         for item in strategies
     ]
