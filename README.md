@@ -158,7 +158,7 @@ CloudMirror-Deduction/
 │   │   ├── test_topology.py         # 22 个拓扑测试
 │   │   ├── test_faults.py           # 16 个故障测试
 │   │   ├── test_propagation.py      # 15 个传播算法测试
-│   │   ├── test_recovery.py         # 13 个恢复策略测试
+│   │   ├── test_recovery.py         # 16 个恢复策略测试
 │   │   └── test_analysis_history.py # 10 个历史记录测试（共 82 个）
 │   ├── requirements.txt
 │   ├── pytest.ini
