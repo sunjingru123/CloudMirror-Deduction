@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, markRaw, onMounted, reactive, ref, shallowRef } from 'vue'
+import { computed, h, markRaw, onMounted, reactive, ref, shallowRef } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MarkerType, VueFlow } from '@vue-flow/core'
@@ -484,7 +484,7 @@ async function removeSelectedEdge() {
   }
 }
 
-/** 反转依赖方向：先建反向边（若已存在则后端返回冲突），成功后再删除原边。 */
+/** 反转依赖方向：确认 → 建反向边 → 删原边 → 从后端刷新。 */
 async function reverseSelectedEdge() {
   if (!topology.value || !selectedEdge.value) return
   const edgeId = selectedEdge.value.data?.edgeId
@@ -493,33 +493,92 @@ async function reverseSelectedEdge() {
   const targetId = Number(selectedEdge.value.target)
   if (!Number.isFinite(sourceId) || !Number.isFinite(targetId)) return
 
+  const sourceName = nodeName(sourceId)
+  const targetName = nodeName(targetId)
+
+  // 确认框：明确展示反转前后的起点与终点
+  try {
+    await ElMessageBox.confirm(
+      h('div', { style: 'line-height: 1.9' }, [
+        h('p', [h('strong', '反转前：'), `${sourceName} → ${targetName}`]),
+        h(
+          'p',
+          { style: 'color: #64748b; font-size: 12.5px' },
+          `${sourceName} 依赖 ${targetName}（箭头指向被依赖方）`,
+        ),
+        h('p', { style: 'margin-top: 10px' }, [
+          h('strong', '反转后：'),
+          `${targetName} → ${sourceName}`,
+        ]),
+        h(
+          'p',
+          { style: 'color: #64748b; font-size: 12.5px' },
+          `${targetName} 依赖 ${sourceName}`,
+        ),
+      ]),
+      '反转依赖方向',
+      {
+        type: 'warning',
+        confirmButtonText: '确认反转',
+        cancelButtonText: '取消',
+        distinguishCancelAndClose: true,
+      },
+    )
+  } catch {
+    return
+  }
+
   reversingEdge.value = true
   try {
-    // 先创建反向边：若反向依赖已存在，后端返回冲突，原边保持不变
+    // 先创建反向边：若反向依赖已存在，后端返回 409，原边保持不变（不覆盖已有数据）
     const { data } = await topologyApi.addEdge(topology.value.id, {
       source_node_id: targetId,
       target_node_id: sourceId,
     })
-    topology.value.edges = [...topology.value.edges, data]
+
     try {
       await topologyApi.removeEdge(topology.value.id, edgeId)
-      topology.value.edges = topology.value.edges.filter((item) => item.id !== edgeId)
-      selectedEdgeId.value = data.id
-      rebuildFlowEdges()
-      ElMessage.success(
-        `依赖方向已反转：${nodeName(targetId)} 依赖 ${nodeName(sourceId)}`,
-      )
     } catch (error) {
-      rebuildFlowEdges()
-      ElMessage.warning(
-        extractErrorMessage(error, '反向依赖已创建，但删除原依赖失败，请检查该拓扑的依赖关系'),
+      // 删除原边失败：回滚刚建的反向边，保证不产生重复数据，保留原始连线
+      try {
+        await topologyApi.removeEdge(topology.value.id, data.id)
+      } catch {
+        // 回滚失败时交由后端数据刷新体现真实状态
+      }
+      await refreshEdgesFromServer()
+      ElMessage.error(
+        extractErrorMessage(error, '反转失败：无法删除原依赖关系，已保留原始连线'),
       )
+      return
     }
+
+    selectedEdgeId.value = data.id
+    await refreshEdgesFromServer()
+    ElMessage.success(`依赖方向已反转：${targetName} 依赖 ${sourceName}`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反转依赖方向失败'))
+    // 创建反向边失败（含 409 重复边 / 网络错误）：原始连线保持不变
+    await refreshEdgesFromServer()
+    ElMessage.error(extractErrorMessage(error, '反转依赖方向失败，已保留原始连线'))
   } finally {
     reversingEdge.value = false
   }
+}
+
+/** 只刷新依赖边与节点映射（保留画布中的节点位置），以后端数据为准。 */
+async function refreshEdgesFromServer(): Promise<void> {
+  if (!topology.value) return
+  try {
+    const { data } = await topologyApi.detail(topology.value.id)
+    topology.value = data
+    nodesById.value = Object.fromEntries(data.nodes.map((node) => [node.id, node]))
+    rebuildFlowEdges()
+  } catch {
+    // 刷新失败时保留当前内存数据，不阻断主流程
+  }
+}
+
+function clearEdgeSelection() {
+  selectedEdgeId.value = null
 }
 
 // --------------------------------------------------------------------------- //
@@ -725,7 +784,8 @@ onMounted(loadTopology)
       操作提示：点击下方按钮添加节点；拖动节点调整位置（松手即自动保存）；
       从节点<strong>底部</strong>圆点（「依赖对方」）拖到另一节点<strong>顶部</strong>圆点（「被依赖」）创建依赖
       （<strong>箭头方向 = 依赖方向</strong>：A → B 表示 A 依赖 B）；点击节点或连线可在右侧编辑或删除，
-      若方向建反，可选中连线后点击「反转依赖方向」。
+      若方向建反，<strong>单击该连线</strong>后画布上方会出现「反转依赖方向」浮动操作条
+      （也可在右侧面板底部找到同名按钮）。
       冗余关系（主备 / 双活）是<strong>独立于依赖边</strong>的声明，用于恢复策略的备用节点判定，
       可在右侧「冗余关系」区域创建。
     </p>
@@ -754,6 +814,29 @@ onMounted(loadTopology)
           <div v-if="!loading && flowNodes.length === 0" class="editor-empty">
             当前拓扑还没有节点，点击上方节点按钮开始添加
           </div>
+        </div>
+
+        <!-- 选中依赖连线后出现的浮动操作条（不依赖右侧面板滚动，始终可见） -->
+        <div v-if="selectedEdge" class="edge-bar" role="region" aria-label="依赖连线操作">
+          <span class="edge-bar-title">已选中依赖</span>
+          <span class="edge-bar-dir">
+            <strong>{{ nodeName(selectedEdge.source) }}</strong>
+            <span class="edge-bar-arrow">→</span>
+            <strong>{{ nodeName(selectedEdge.target) }}</strong>
+            <span class="edge-bar-note">依赖</span>
+          </span>
+          <el-button
+            size="small"
+            type="primary"
+            :loading="reversingEdge"
+            @click="reverseSelectedEdge"
+          >
+            反转依赖方向
+          </el-button>
+          <el-button size="small" type="danger" plain @click="removeSelectedEdge">
+            删除连线
+          </el-button>
+          <el-button size="small" text @click="clearEdgeSelection">关闭</el-button>
         </div>
 
         <div class="editor-legend">
@@ -912,7 +995,8 @@ onMounted(loadTopology)
         <template v-else>
           <p class="inspector-label">未选中元素</p>
           <p class="inspector-desc cm-muted">
-            在画布中点击节点可编辑其属性，点击连线可删除依赖关系。
+            在画布中点击节点可编辑其属性；<strong>单击一条依赖连线</strong>会在画布上方弹出操作条，
+            可直接「反转依赖方向」或删除该连线。
           </p>
         </template>
       </aside>
@@ -1099,6 +1183,53 @@ onMounted(loadTopology)
   font-size: 13.5px;
   color: var(--cm-text-muted);
   pointer-events: none;
+}
+
+.edge-bar {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 6;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(31, 111, 235, 0.22);
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 10px 26px rgba(15, 42, 90, 0.16);
+  backdrop-filter: blur(4px);
+}
+
+.edge-bar-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--cm-primary-soft);
+  color: var(--cm-primary);
+}
+
+.edge-bar-dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: #0f172a;
+}
+
+.edge-bar-arrow {
+  color: var(--cm-primary);
+  font-weight: 700;
+}
+
+.edge-bar-note {
+  font-size: 11px;
+  color: #64748b;
 }
 
 .editor-inspector {
